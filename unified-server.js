@@ -1,3 +1,5 @@
+const multer = require("multer");
+const { Readable } = require("stream");
 const session = require("express-session");
 const cookieParser = require("cookie-parser");
 const crypto = require("crypto");
@@ -953,9 +955,7 @@ class RequestHandler {
   }
   _buildProxyRequest(req, requestId) {
     let requestBody = "";
-    if (Buffer.isBuffer(req.body)) {
-      requestBody = req.body.toString("utf-8"); // 直接将Buffer转为字符串
-    } else if (req.body) {
+    if (req.body) {
       requestBody = JSON.stringify(req.body);
     }
     return {
@@ -1542,7 +1542,7 @@ class ProxyServerSystem extends EventEmitter {
 
   _createExpressApp() {
     const app = express();
-    app.use(express.raw({ type: "application/json", limit: "100mb" }));
+    app.use(express.json({ limit: "100mb" }));
     app.use(express.urlencoded({ extended: true }));
     app.use((req, res, next) => {
       if (
