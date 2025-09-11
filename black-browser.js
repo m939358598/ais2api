@@ -228,6 +228,7 @@ class RequestProcessor {
       try {
         let bodyObj = JSON.parse(requestSpec.body);
 
+        // [MODIFIED] 统一的图像模型检测
         const isImageModel =
           requestSpec.path.includes("-image-") ||
           requestSpec.path.includes("imagen");
@@ -260,27 +261,43 @@ class RequestProcessor {
           }
         }
 
-        if (
-          bodyObj.contents &&
-          Array.isArray(bodyObj.contents) &&
-          bodyObj.contents.length > 0
-        ) {
-          const lastContent = bodyObj.contents[bodyObj.contents.length - 1];
-          if (
-            lastContent.parts &&
-            Array.isArray(lastContent.parts) &&
-            lastContent.parts.length > 0
-          ) {
-            const lastPart = lastContent.parts[lastContent.parts.length - 1];
-            if (lastPart.text) {
-              lastPart.text += `\n\n[sig:${this._generateRandomString(5)}]`;
+        if (bodyObj.contents && Array.isArray(bodyObj.contents)) {
+          // 遍历所有 contents (通常只有一个)
+          for (const content of bodyObj.contents) {
+            if (content.parts && Array.isArray(content.parts)) {
+              // 1. 寻找最后一个文本部分
+              let lastTextPart = null;
+              for (let i = content.parts.length - 1; i >= 0; i--) {
+                if (content.parts[i].text) {
+                  lastTextPart = content.parts[i];
+                  break; // 找到后立即退出循环
+                }
+              }
+
+              // 2. 如果找到了文本部分，就在其末尾添加签名
+              if (lastTextPart) {
+                Logger.output("[智能签名] 已定位到文本部分，正在添加SIG...");
+                lastTextPart.text += `\n\n[sig:${this._generateRandomString(
+                  5
+                )}]`;
+              } else {
+                // 3. 如果完全没有文本（例如，只发了一张图），则主动创建一个新的文本 part 来携带签名
+                Logger.output(
+                  "[智能签名] 未发现文本部分，正在创建新的文本部分以携带SIG..."
+                );
+                content.parts.push({
+                  text: `\n\n[sig:${this._generateRandomString(5)}]`,
+                });
+              }
             }
           }
         }
+        // ==========================================================
 
         config.body = JSON.stringify(bodyObj);
       } catch (e) {
-        config.body = requestSpec.body;
+        Logger.output("处理请求体时发生错误:", e.message);
+        config.body = requestSpec.body; // Fallback to original body
       }
     }
     return config;
