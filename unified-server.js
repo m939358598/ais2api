@@ -952,6 +952,9 @@ class RequestHandler {
     return `${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
   }
   _buildProxyRequest(req, requestId) {
+    console.log("---------- Received from SillyTavern ----------");
+    console.log(JSON.stringify(req.body, null, 2));
+    console.log("---------------------------------------------");
     let requestBody = "";
     if (req.body) {
       requestBody = JSON.stringify(req.body);
