@@ -1541,6 +1541,7 @@ class ProxyServerSystem extends EventEmitter {
       next();
     });
     app.use(express.json({ limit: "100mb" }));
+    app.use(express.urlencoded({ extended: true }));
     const sessionSecret =
       (this.config.apiKeys && this.config.apiKeys[0]) ||
       crypto.randomBytes(20).toString("hex");
@@ -1574,9 +1575,9 @@ class ProxyServerSystem extends EventEmitter {
       res.send(loginHtml);
     });
     app.post("/login", (req, res) => {
-      const bodyString = req.body.toString("utf-8");
-      const submittedKey = new URLSearchParams(bodyString).get("apiKey");
-      if (submittedKey && this.config.apiKeys.includes(submittedKey)) {
+      // [优化] 直接从解析好的 body 中获取 apiKey
+      const { apiKey } = req.body;
+      if (apiKey && this.config.apiKeys.includes(apiKey)) {
         req.session.isAuthenticated = true;
         res.redirect("/");
       } else {
