@@ -953,9 +953,11 @@ class RequestHandler {
   }
   _buildProxyRequest(req, requestId) {
     let requestBody = "";
-    if (Buffer.isBuffer(req.body)) requestBody = req.body.toString("utf-8");
-    else if (typeof req.body === "string") requestBody = req.body;
-    else if (req.body) requestBody = JSON.stringify(req.body);
+    if (Buffer.isBuffer(req.body)) {
+      requestBody = req.body.toString("utf-8"); // 直接将Buffer转为字符串
+    } else if (req.body) {
+      requestBody = JSON.stringify(req.body);
+    }
     return {
       path: req.path,
       method: req.method,
@@ -1540,7 +1542,7 @@ class ProxyServerSystem extends EventEmitter {
 
   _createExpressApp() {
     const app = express();
-    app.use(express.json({ limit: "100mb" }));
+    app.use(express.raw({ type: "application/json", limit: "100mb" }));
     app.use(express.urlencoded({ extended: true }));
     app.use((req, res, next) => {
       if (
@@ -1589,7 +1591,6 @@ class ProxyServerSystem extends EventEmitter {
       res.send(loginHtml);
     });
     app.post("/login", (req, res) => {
-      // [优化] 直接从解析好的 body 中获取 apiKey
       const { apiKey } = req.body;
       if (apiKey && this.config.apiKeys.includes(apiKey)) {
         req.session.isAuthenticated = true;
