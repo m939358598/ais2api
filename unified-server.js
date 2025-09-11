@@ -312,21 +312,36 @@ class BrowserManager {
           overlays.forEach((el) => el.remove());
         }
       });
-      // 加一个极短的暂停，确保DOM更新完成
-      this.logger.info(
-        '[Browser] (清场 #1) 准备点击"Code"，强行移除所有可能的遮罩层...'
-      );
-      await this.page.evaluate(() => {
-        document
-          .querySelectorAll("div.cdk-overlay-backdrop")
-          .forEach((el) => el.remove());
-      });
-      await this.page.waitForTimeout(250); // 短暂等待DOM更新
+      this.logger.info('[Browser] (步骤1/5) 准备点击 "Code" 按钮...');
+      const maxRetries = 5;
+      let clickSuccess = false;
+      for (let i = 1; i <= maxRetries; i++) {
+        try {
+          this.logger.info(`  [尝试 ${i}/${maxRetries}] 清理遮罩层并点击...`);
+          await this.page.evaluate(() => {
+            document
+              .querySelectorAll("div.cdk-overlay-backdrop")
+              .forEach((el) => el.remove());
+          });
+          await this.page.waitForTimeout(500); // 清理后短暂等待
 
-      this.logger.info(
-        '[Browser] (步骤1/5) 正在点击 "Code" 按钮以显示编辑器...'
-      );
-      await this.page.locator('button:text("Code")').click({ timeout: 20000 });
+          await this.page
+            .locator('button:text("Code")')
+            .click({ timeout: 10000 }); // 将单次超时缩短
+          clickSuccess = true;
+          this.logger.info("  ✅ 点击成功！");
+          break; // 成功后跳出循环
+        } catch (error) {
+          this.logger.warn(
+            `  [尝试 ${i}/${maxRetries}] 点击失败: ${
+              error.message.split("\n")[0]
+            }`
+          );
+          if (i === maxRetries) {
+            throw new Error(`多次尝试后仍无法点击 "Code" 按钮，初始化失败。`);
+          }
+        }
+      }
 
       this.logger.info(
         '[Browser] (步骤2/5) "Code" 按钮点击成功，等待编辑器变为可见...'
@@ -1541,7 +1556,7 @@ class ProxyServerSystem extends EventEmitter {
       next();
     });
     app.use(express.json({ limit: "100mb" }));
-    app.use(express.urlencoded({ extended: true }));
+    app.use(express.raw({ type: "*/*", limit: "100mb" }));
     const sessionSecret =
       (this.config.apiKeys && this.config.apiKeys[0]) ||
       crypto.randomBytes(20).toString("hex");
@@ -1575,9 +1590,9 @@ class ProxyServerSystem extends EventEmitter {
       res.send(loginHtml);
     });
     app.post("/login", (req, res) => {
-      // [优化] 直接从解析好的 body 中获取 apiKey
-      const { apiKey } = req.body;
-      if (apiKey && this.config.apiKeys.includes(apiKey)) {
+      const bodyString = req.body.toString("utf-8");
+      const submittedKey = new URLSearchParams(bodyString).get("apiKey");
+      if (submittedKey && this.config.apiKeys.includes(submittedKey)) {
         req.session.isAuthenticated = true;
         res.redirect("/");
       } else {
