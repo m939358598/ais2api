@@ -318,6 +318,7 @@ class BrowserManager {
       for (let i = 1; i <= maxRetries; i++) {
         try {
           this.logger.info(`  [尝试 ${i}/${maxRetries}] 清理遮罩层并点击...`);
+          // 每次尝试前都强力清除遮罩层
           await this.page.evaluate(() => {
             document
               .querySelectorAll("div.cdk-overlay-backdrop")
@@ -342,7 +343,6 @@ class BrowserManager {
           }
         }
       }
-
       this.logger.info(
         '[Browser] (步骤2/5) "Code" 按钮点击成功，等待编辑器变为可见...'
       );
@@ -1540,8 +1540,8 @@ class ProxyServerSystem extends EventEmitter {
 
   _createExpressApp() {
     const app = express();
-
-    // Section 1 & 2 (核心中间件和登录路由) 保持不变...
+    app.use(express.json({ limit: "100mb" }));
+    app.use(express.urlencoded({ extended: true }));
     app.use((req, res, next) => {
       if (
         req.path !== "/api/status" &&
@@ -1555,9 +1555,8 @@ class ProxyServerSystem extends EventEmitter {
       }
       next();
     });
-    app.use(express.json({ limit: "100mb" }));
-    app.use(express.raw({ type: "*/*", limit: "100mb" }));
     const sessionSecret =
+      // Section 1 & 2 (核心中间件和登录路由) 保持不变...
       (this.config.apiKeys && this.config.apiKeys[0]) ||
       crypto.randomBytes(20).toString("hex");
     app.use(cookieParser());
@@ -1590,9 +1589,9 @@ class ProxyServerSystem extends EventEmitter {
       res.send(loginHtml);
     });
     app.post("/login", (req, res) => {
-      const bodyString = req.body.toString("utf-8");
-      const submittedKey = new URLSearchParams(bodyString).get("apiKey");
-      if (submittedKey && this.config.apiKeys.includes(submittedKey)) {
+      // [优化] 直接从解析好的 body 中获取 apiKey
+      const { apiKey } = req.body;
+      if (apiKey && this.config.apiKeys.includes(apiKey)) {
         req.session.isAuthenticated = true;
         res.redirect("/");
       } else {
