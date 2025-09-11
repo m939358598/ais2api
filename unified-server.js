@@ -1541,7 +1541,6 @@ class ProxyServerSystem extends EventEmitter {
       next();
     });
     app.use(express.json({ limit: "100mb" }));
-    app.use(express.raw({ type: "*/*", limit: "100mb" }));
     const sessionSecret =
       (this.config.apiKeys && this.config.apiKeys[0]) ||
       crypto.randomBytes(20).toString("hex");
