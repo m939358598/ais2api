@@ -952,9 +952,6 @@ class RequestHandler {
     return `${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
   }
   _buildProxyRequest(req, requestId) {
-    console.log("---------- Received from SillyTavern ----------");
-    console.log(JSON.stringify(req.body, null, 2));
-    console.log("---------------------------------------------");
     let requestBody = "";
     if (req.body) {
       requestBody = JSON.stringify(req.body);
@@ -1543,8 +1540,6 @@ class ProxyServerSystem extends EventEmitter {
 
   _createExpressApp() {
     const app = express();
-    app.use(express.json({ limit: "100mb" }));
-    app.use(express.urlencoded({ extended: true }));
     app.use((req, res, next) => {
       if (
         req.path !== "/api/status" &&
@@ -1558,6 +1553,9 @@ class ProxyServerSystem extends EventEmitter {
       }
       next();
     });
+    app.use(express.json({ limit: "100mb" }));
+    app.use(express.urlencoded({ extended: true }));
+
     const sessionSecret =
       // Section 1 & 2 (核心中间件和登录路由) 保持不变...
       (this.config.apiKeys && this.config.apiKeys[0]) ||
