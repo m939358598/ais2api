@@ -902,15 +902,24 @@ class RequestHandler {
     const messageQueue = this.connectionRegistry.createMessageQueue(requestId);
 
     try {
-      if (this.serverSystem.streamingMode === "fake") {
-        await this._handlePseudoStreamResponse(
-          proxyRequest,
-          messageQueue,
-          req,
-          res
-        );
+      // [修改] 增加“交通警察”逻辑，根据客户端Accept头判断其期望的响应类型
+      const wantsStream =
+        req.headers.accept && req.headers.accept.includes("text/event-stream");
+
+      if (wantsStream) {
+        this.logger.info("[Request] 客户端请求流式响应，进入流式处理模式...");
+        if (this.serverSystem.streamingMode === "fake") {
+          await this._handlePseudoStreamResponse(
+            proxyRequest,
+            messageQueue,
+            req,
+            res
+          );
+        } else {
+          await this._handleRealStreamResponse(proxyRequest, messageQueue, res);
+        }
       } else {
-        await this._handleRealStreamResponse(proxyRequest, messageQueue, res);
+        await this._handleNonStreamResponse(proxyRequest, messageQueue, res);
       }
     } catch (error) {
       this._handleRequestError(error, res);
@@ -1170,6 +1179,74 @@ class RequestHandler {
     }
   }
 
+  async _handleNonStreamResponse(proxyRequest, messageQueue, res) {
+    this.logger.info(`[Request] 客户端请求非流式响应，启动标准处理模式...`);
+
+    // 转发请求到浏览器端，这部分和流式逻辑完全一样
+    this._forwardRequest(proxyRequest);
+
+    try {
+      // 1. 等待响应头信息
+      const headerMessage = await messageQueue.dequeue();
+      if (headerMessage.event_type === "error") {
+        // 如果浏览器端直接返回错误（如用户取消），则提前结束
+        if (
+          headerMessage.message &&
+          headerMessage.message.includes("The user aborted a request")
+        ) {
+          this.logger.info(
+            `[Request] 请求 #${proxyRequest.request_id} 已被用户妥善取消。`
+          );
+        } else {
+          this.logger.error(
+            `[Request] 浏览器端返回错误: ${headerMessage.message}`
+          );
+          await this._handleRequestFailureAndSwitch(headerMessage, null);
+        }
+        // 对于非流式请求，即使是错误，也最好返回一个标准的JSON错误体
+        return this._sendErrorResponse(
+          res,
+          headerMessage.status || 500,
+          headerMessage.message
+        );
+      }
+
+      // 2. 准备一个缓冲区，用于拼接所有数据块
+      let fullBody = "";
+      let finalMessage;
+
+      // 3. 循环接收数据，直到收到结束信号
+      while (true) {
+        const dataMessage = await messageQueue.dequeue(300000); // 300秒超时
+        if (dataMessage.type === "STREAM_END") {
+          this.logger.info("[Request] 收到流结束信号，数据接收完毕。");
+          break;
+        }
+        if (dataMessage.data) {
+          fullBody += dataMessage.data;
+        }
+        finalMessage = dataMessage; // 保存最后一条消息用于诊断
+      }
+
+      // 4. 重置失败计数器（如果需要）
+      if (proxyRequest.is_generative && this.failureCount > 0) {
+        this.logger.info(
+          `✅ [Auth] 非流式生成请求成功 - 失败计数已从 ${this.failureCount} 重置为 0`
+        );
+        this.failureCount = 0;
+      }
+
+      // 5. 设置正确的JSON响应头，并一次性发送全部数据
+      res
+        .status(headerMessage.status || 200)
+        .type("application/json")
+        .send(fullBody);
+      this.logger.info(`[Request] 已向客户端发送完整的非流式JSON响应。`);
+    } catch (error) {
+      this._handleRequestError(error, res);
+    }
+  }
+
   _getKeepAliveChunk(req) {
     if (req.path.includes("chat/completions")) {
       const payload = {
@@ -1273,7 +1350,7 @@ class ProxyServerSystem extends EventEmitter {
       httpPort: 7860,
       host: "0.0.0.0",
       wsPort: 9998,
-      streamingMode: "fake",
+      streamingMode: "real",
       failureThreshold: 3,
       switchOnUses: 40,
       maxRetries: 1,
