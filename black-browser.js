@@ -233,7 +233,7 @@ class RequestProcessor {
           requestSpec.path.includes("imagen");
 
         if (isImageModel) {
-          const incompatibleKeys = ["tool_config", "toolChoice"];
+          const incompatibleKeys = ["tool_config", "toolChoice", "tools"];
           let removedKeys = [];
           incompatibleKeys.forEach((key) => {
             if (bodyObj.hasOwnProperty(key)) {
