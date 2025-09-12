@@ -898,14 +898,15 @@ class RequestHandler {
 
     const proxyRequest = this._buildProxyRequest(req, requestId);
     proxyRequest.is_generative = isGenerativeRequest;
+    // 根据判断结果，为浏览器脚本准备标志位
     const messageQueue = this.connectionRegistry.createMessageQueue(requestId);
+    const wantsStreamByHeader =
+      req.headers.accept && req.headers.accept.includes("text/event-stream");
+    const wantsStreamByPath = req.path.includes(":streamGenerateContent");
+    const wantsStream = wantsStreamByHeader || wantsStreamByPath;
+    proxyRequest.client_wants_stream = wantsStream;
 
     try {
-      const wantsStreamByHeader =
-        req.headers.accept && req.headers.accept.includes("text/event-stream");
-      const wantsStreamByPath = req.path.includes(":streamGenerateContent");
-      const wantsStream = wantsStreamByHeader || wantsStreamByPath;
-
       if (wantsStream) {
         // --- 客户端想要流式响应 ---
         this.logger.info("[Request] 客户端启用流式传输，进入流式处理模式...");
