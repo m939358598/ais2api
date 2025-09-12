@@ -916,7 +916,6 @@ class RequestHandler {
       req.headers.accept && req.headers.accept.includes("text/event-stream");
     const wantsStreamByPath = req.path.includes(":streamGenerateContent");
     const wantsStream = wantsStreamByHeader || wantsStreamByPath;
-    proxyRequest.client_wants_stream = wantsStream;
 
     try {
       if (wantsStream) {
@@ -1506,25 +1505,58 @@ class RequestHandler {
   }
 
   // [新增] Google 到 OpenAI 响应的翻译器（流式）
+  // [最终版修复] 请用这个完整的函数替换掉旧的 _translateGoogleToOpenAIStream 函数
   _translateGoogleToOpenAIStream(googleChunk, modelName = "gemini-pro") {
     if (!googleChunk || googleChunk.trim() === "") {
       return null; // 忽略空块
     }
 
+    // [修复] 检查并移除 SSE 的 "data: " 前缀
+    let jsonString = googleChunk;
+    if (jsonString.startsWith("data: ")) {
+      jsonString = jsonString.substring(6).trim();
+    }
+
+    // 如果移除前后为空（例如 keep-alive 消息），则忽略
+    if (!jsonString || jsonString === "[DONE]") {
+      return null;
+    }
+
     let googleResponse;
     try {
-      googleResponse = JSON.parse(googleChunk);
+      googleResponse = JSON.parse(jsonString);
     } catch (e) {
-      this.logger.warn(`[Adapter] 无法解析Google返回的JSON块: ${googleChunk}`);
+      this.logger.warn(`[Adapter] 无法解析Google返回的JSON块: ${jsonString}`);
       return null;
     }
 
     const candidate = googleResponse.candidates?.[0];
     if (!candidate) {
+      // 检查是否存在因安全设置等原因导致的 promptFeedback
+      if (googleResponse.promptFeedback) {
+        this.logger.warn(
+          `[Adapter] Google返回了promptFeedback，可能已被拦截: ${JSON.stringify(
+            googleResponse.promptFeedback
+          )}`
+        );
+        // 可以在这里构建一个错误消息的OpenAI chunk
+        const errorText = `[ProxySystem Error] Request blocked due to safety settings. Finish Reason: ${googleResponse.promptFeedback.blockReason}`;
+        return `data: ${JSON.stringify({
+          id: `chatcmpl-${this._generateRequestId()}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: modelName,
+          choices: [
+            { index: 0, delta: { content: errorText }, finish_reason: "stop" },
+          ],
+        })}\n\n`;
+      }
       return null;
     }
 
+    // 提取核心内容和结束原因
     const content = candidate.content?.parts?.[0]?.text || "";
+    // Google流式响应的finishReason在candidate层级
     const finishReason = candidate.finishReason;
 
     const openaiResponse = {
@@ -1538,6 +1570,7 @@ class RequestHandler {
           delta: {
             content: content,
           },
+          // [修复] 正确映射finish_reason
           finish_reason: finishReason || null,
         },
       ],
