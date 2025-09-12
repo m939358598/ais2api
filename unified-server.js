@@ -954,6 +954,109 @@ class RequestHandler {
     }
   }
 
+  async processOpenAIRequest(req, res) {
+    const requestId = this._generateRequestId();
+    const isOpenAIStream = req.body.stream === true;
+    const model = req.body.model || "gemini-1.5-pro-latest"; // 从请求中获取模型或使用默认
+
+    // 1. 翻译请求体
+    let googleBody;
+    try {
+      googleBody = this._translateOpenAIToGoogle(req.body);
+    } catch (error) {
+      this.logger.error(`[Adapter] OpenAI请求翻译失败: ${error.message}`);
+      return this._sendErrorResponse(
+        res,
+        400,
+        "Invalid OpenAI request format."
+      );
+    }
+
+    // 2. 构建代理请求
+    // 决定请求Google的哪个接口（流式或非流式）
+    const googleEndpoint = isOpenAIStream
+      ? "streamGenerateContent"
+      : "generateContent";
+    const proxyRequest = {
+      path: `/v1beta/models/${model}:${googleEndpoint}`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      query_params: isOpenAIStream ? { alt: "sse" } : {},
+      body: JSON.stringify(googleBody),
+      request_id: requestId,
+      streaming_mode: "real", // 对于适配器，我们总是让浏览器端进行真实请求
+      client_wants_stream: true, // 告诉浏览器脚本总是显示模式
+    };
+
+    const messageQueue = this.connectionRegistry.createMessageQueue(requestId);
+
+    // 3. 发送和接收（复用现有逻辑）
+    try {
+      if (isOpenAIStream) {
+        // 设置流式响应头
+        res.status(200).set({
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        });
+
+        this._forwardRequest(proxyRequest);
+
+        // 循环接收并翻译响应
+        while (true) {
+          const message = await messageQueue.dequeue(300000); // 5分钟超时
+          if (message.type === "STREAM_END") {
+            res.write("data: [DONE]\n\n");
+            break;
+          }
+          if (message.data) {
+            const translatedChunk = this._translateGoogleToOpenAIStream(
+              message.data,
+              model
+            );
+            if (translatedChunk) {
+              res.write(translatedChunk);
+            }
+          }
+        }
+      } else {
+        // 非流式逻辑 (更简单)
+        this._forwardRequest(proxyRequest);
+        const headerMsg = await messageQueue.dequeue();
+        if (headerMsg.event_type === "error")
+          throw new Error(headerMsg.message);
+
+        const bodyMsg = await messageQueue.dequeue();
+        const googleResponse = JSON.parse(bodyMsg.data);
+        const text =
+          googleResponse.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+        // 构建OpenAI非流式响应
+        const openaiResponse = {
+          id: `chatcmpl-${requestId}`,
+          object: "chat.completion",
+          created: Math.floor(Date.now() / 1000),
+          model: model,
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: text },
+              finish_reason: googleResponse.candidates?.[0]?.finishReason,
+            },
+          ],
+        };
+        res.status(200).json(openaiResponse);
+      }
+    } catch (error) {
+      this._handleRequestError(error, res);
+    } finally {
+      this.connectionRegistry.removeMessageQueue(requestId);
+      if (!res.writableEnded) {
+        res.end();
+      }
+    }
+  }
+
   // --- 新增一个辅助方法，用于发送取消指令 ---
   _cancelBrowserRequest(requestId) {
     const connection = this.connectionRegistry.getFirstConnection();
@@ -1330,6 +1433,117 @@ class RequestHandler {
         .type("application/json")
         .send(JSON.stringify(errorPayload));
     }
+  }
+
+  // [新增] OpenAI 到 Google 请求的翻译器
+  _translateOpenAIToGoogle(openaiBody) {
+    this.logger.info("[Adapter] 开始将OpenAI请求格式翻译为Google格式...");
+    const googleContents = [];
+    let systemInstruction = null;
+
+    // 1. 分离出 system 指令
+    const systemMessages = openaiBody.messages.filter(
+      (msg) => msg.role === "system"
+    );
+    if (systemMessages.length > 0) {
+      // 将所有 system message 的内容合并
+      const systemContent = systemMessages.map((msg) => msg.content).join("\n");
+      systemInstruction = {
+        role: "user", // Google API 要求 systemInstruction 的 role 是 user
+        parts: [{ text: systemContent }],
+      };
+    }
+
+    // 2. 转换 user 和 assistant 消息
+    const conversationMessages = openaiBody.messages.filter(
+      (msg) => msg.role !== "system"
+    );
+    for (const message of conversationMessages) {
+      googleContents.push({
+        role: message.role === "assistant" ? "model" : "user",
+        parts: [{ text: message.content }],
+      });
+    }
+
+    // 3. 组合最终的 contents 数组
+    // Google 要求 user/model 交替，且 system 指令（如果存在）必须放在最前面
+    const finalContents = systemInstruction
+      ? [systemInstruction, ...googleContents]
+      : googleContents;
+
+    // 4. 转换生成参数
+    const generationConfig = {
+      // temperature, topP, topK 名字相同，可以直接映射
+      temperature: openaiBody.temperature,
+      topP: openaiBody.top_p,
+      topK: openaiBody.top_k,
+      // max_tokens -> maxOutputTokens
+      maxOutputTokens: openaiBody.max_tokens,
+      // stop -> stopSequences
+      stopSequences: openaiBody.stop,
+    };
+
+    const googleRequest = {
+      contents: finalContents,
+      generationConfig: generationConfig,
+      // 安全设置可以从您的项目中硬编码或进一步映射
+      safetySettings: [
+        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+        {
+          category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+          threshold: "BLOCK_NONE",
+        },
+        {
+          category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+          threshold: "BLOCK_NONE",
+        },
+      ],
+    };
+
+    this.logger.info("[Adapter] 翻译完成。");
+    return googleRequest;
+  }
+
+  // [新增] Google 到 OpenAI 响应的翻译器（流式）
+  _translateGoogleToOpenAIStream(googleChunk, modelName = "gemini-pro") {
+    if (!googleChunk || googleChunk.trim() === "") {
+      return null; // 忽略空块
+    }
+
+    let googleResponse;
+    try {
+      googleResponse = JSON.parse(googleChunk);
+    } catch (e) {
+      this.logger.warn(`[Adapter] 无法解析Google返回的JSON块: ${googleChunk}`);
+      return null;
+    }
+
+    const candidate = googleResponse.candidates?.[0];
+    if (!candidate) {
+      return null;
+    }
+
+    const content = candidate.content?.parts?.[0]?.text || "";
+    const finishReason = candidate.finishReason;
+
+    const openaiResponse = {
+      id: `chatcmpl-${this._generateRequestId()}`,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model: modelName,
+      choices: [
+        {
+          index: 0,
+          delta: {
+            content: content,
+          },
+          finish_reason: finishReason || null,
+        },
+      ],
+    };
+
+    return `data: ${JSON.stringify(openaiResponse)}\n\n`;
   }
 }
 
@@ -1942,6 +2156,9 @@ class ProxyServerSystem extends EventEmitter {
       }
     });
     app.use(this._createAuthMiddleware());
+    app.post("/v1/chat/completions", (req, res) => {
+      this.requestHandler.processOpenAIRequest(req, res);
+    });
     app.all(/(.*)/, (req, res) => {
       this.requestHandler.processRequest(req, res);
     });
