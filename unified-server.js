@@ -1434,11 +1434,11 @@ class RequestHandler {
     }
   }
 
-  // [新增] OpenAI 到 Google 请求的翻译器
   _translateOpenAIToGoogle(openaiBody) {
     this.logger.info("[Adapter] 开始将OpenAI请求格式翻译为Google格式...");
-    const googleContents = [];
+
     let systemInstruction = null;
+    const googleContents = [];
 
     // 1. 分离出 system 指令
     const systemMessages = openaiBody.messages.filter(
@@ -1448,7 +1448,8 @@ class RequestHandler {
       // 将所有 system message 的内容合并
       const systemContent = systemMessages.map((msg) => msg.content).join("\n");
       systemInstruction = {
-        role: "user", // Google API 要求 systemInstruction 的 role 是 user
+        // Google Gemini 1.5 Pro 开始正式支持 system instruction
+        role: "system",
         parts: [{ text: systemContent }],
       };
     }
@@ -1458,47 +1459,65 @@ class RequestHandler {
       (msg) => msg.role !== "system"
     );
     for (const message of conversationMessages) {
+      const googleParts = [];
+
+      // [核心改进] 判断 content 是字符串还是数组
+      if (typeof message.content === "string") {
+        // a. 如果是纯文本
+        googleParts.push({ text: message.content });
+      } else if (Array.isArray(message.content)) {
+        // b. 如果是图文混合内容
+        for (const part of message.content) {
+          if (part.type === "text") {
+            googleParts.push({ text: part.text });
+          } else if (part.type === "image_url" && part.image_url) {
+            // 从 data URL 中提取 mimetype 和 base64 数据
+            const dataUrl = part.image_url.url;
+            const match = dataUrl.match(/^data:(image\/.*?);base64,(.*)$/);
+            if (match) {
+              googleParts.push({
+                inlineData: {
+                  mimeType: match[1],
+                  data: match[2],
+                },
+              });
+            }
+          }
+        }
+      }
+
       googleContents.push({
         role: message.role === "assistant" ? "model" : "user",
-        parts: [{ text: message.content }],
+        parts: googleParts,
       });
     }
 
-    // 3. 组合最终的 contents 数组
-    // Google 要求 user/model 交替，且 system 指令（如果存在）必须放在最前面
-    const finalContents = systemInstruction
-      ? [systemInstruction, ...googleContents]
-      : googleContents;
+    // 3. 构建最终的Google请求体
+    const googleRequest = {
+      contents: googleContents,
+      // 如果systemInstruction存在，则添加到请求中
+      ...(systemInstruction && {
+        systemInstruction: { parts: systemInstruction.parts },
+      }),
+    };
 
     // 4. 转换生成参数
     const generationConfig = {
-      // temperature, topP, topK 名字相同，可以直接映射
       temperature: openaiBody.temperature,
       topP: openaiBody.top_p,
       topK: openaiBody.top_k,
-      // max_tokens -> maxOutputTokens
       maxOutputTokens: openaiBody.max_tokens,
-      // stop -> stopSequences
       stopSequences: openaiBody.stop,
     };
+    googleRequest.generationConfig = generationConfig;
 
-    const googleRequest = {
-      contents: finalContents,
-      generationConfig: generationConfig,
-      // 安全设置可以从您的项目中硬编码或进一步映射
-      safetySettings: [
-        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-        {
-          category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-          threshold: "BLOCK_NONE",
-        },
-        {
-          category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-          threshold: "BLOCK_NONE",
-        },
-      ],
-    };
+    // 5. 安全设置
+    googleRequest.safetySettings = [
+      { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+      { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+    ];
 
     this.logger.info("[Adapter] 翻译完成。");
     return googleRequest;
