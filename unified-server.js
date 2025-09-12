@@ -1731,7 +1731,7 @@ class ProxyServerSystem extends EventEmitter {
         browserManager.browser ? "status-ok" : "status-error"
       }">${!!browserManager.browser}</span>
 --- 服务配置 ---
-<span class="label">流式处理策略</span>: ${
+<span class="label">流模式</span>: ${
         config.streamingMode
       } (仅启用流式传输时生效)
 <span class="label">立即切换 (状态码)</span>: ${
@@ -1777,7 +1777,7 @@ class ProxyServerSystem extends EventEmitter {
 <span class="label">服务状态</span>: <span class="status-ok">Running</span>
 <span class="label">浏览器连接</span>: <span class="\${data.status.browserConnected ? "status-ok" : "status-error"}">\${data.status.browserConnected}</span>
 --- 服务配置 ---
-<span class="label">流式处理策略</span>: \${data.status.streamingMode}
+<span class="label">流模式</span>: \${data.status.streamingMode}
 <span class="label">立即切换 (状态码)</span>: \${data.status.immediateSwitchStatusCodes}
 <span class="label">API 密钥</span>: \${data.status.apiKeySource}
 --- 账号状态 ---
