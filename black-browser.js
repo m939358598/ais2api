@@ -372,12 +372,8 @@ class ProxySystem extends EventTarget {
           break;
         default:
           // 默认情况，认为是代理请求
-          let logText = `收到请求: ${requestSpec.method} ${requestSpec.path}`;
-          // [修改] 只有在客户端明确请求流式传输时，才显示服务器的处理模式
-          if (requestSpec.client_wants_stream) {
-            logText += ` (模式: ${requestSpec.streaming_mode || "fake"})`;
-          }
-          Logger.output(logText);
+          // [最终优化] 直接显示路径，不再显示模式，因为路径本身已足够清晰
+          Logger.output(`收到请求: ${requestSpec.method} ${requestSpec.path}`);
 
           await this._processProxyRequest(requestSpec);
           break;
