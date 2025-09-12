@@ -961,7 +961,7 @@ class RequestHandler {
     // 1. 翻译请求体
     let googleBody;
     try {
-      googleBody = this._translateOpenAIToGoogle(req.body);
+      googleBody = this._translateOpenAIToGoogle(req.body, model);
     } catch (error) {
       this.logger.error(`[Adapter] OpenAI请求翻译失败: ${error.message}`);
       return this._sendErrorResponse(
@@ -1021,16 +1021,27 @@ class RequestHandler {
       } else {
         // 非流式逻辑 (更简单)
         this._forwardRequest(proxyRequest);
-        const headerMsg = await messageQueue.dequeue();
-        if (headerMsg.event_type === "error")
-          throw new Error(headerMsg.message);
-
+        await messageQueue.dequeue(); // Header
         const bodyMsg = await messageQueue.dequeue();
         const googleResponse = JSON.parse(bodyMsg.data);
-        const text =
-          googleResponse.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
-        // 构建OpenAI非流式响应
+        let responseContent = "";
+        const candidate = googleResponse.candidates?.[0];
+        const toolCallPart = candidate?.content?.tool_calls?.[0];
+
+        if (
+          toolCallPart &&
+          toolCallPart.functionCall?.name === "image_generation_tool"
+        ) {
+          const args = toolCallPart.functionCall.args;
+          if (args && args.images && args.images.length > 0) {
+            const image = args.images[0];
+            responseContent = `![Generated Image](data:${image.mime_type};base64,${image.b64_data})`;
+          }
+        } else {
+          responseContent = candidate?.content?.parts?.[0]?.text || "";
+        }
+
         const openaiResponse = {
           id: `chatcmpl-${requestId}`,
           object: "chat.completion",
@@ -1039,8 +1050,8 @@ class RequestHandler {
           choices: [
             {
               index: 0,
-              message: { role: "assistant", content: text },
-              finish_reason: googleResponse.candidates?.[0]?.finishReason,
+              message: { role: "assistant", content: responseContent },
+              finish_reason: candidate?.finishReason,
             },
           ],
         };
@@ -1434,7 +1445,7 @@ class RequestHandler {
     }
   }
 
-  _translateOpenAIToGoogle(openaiBody) {
+  _translateOpenAIToGoogle(openaiBody, modelName = "") {
     this.logger.info("[Adapter] 开始将OpenAI请求格式翻译为Google格式...");
 
     let systemInstruction = null;
@@ -1495,11 +1506,50 @@ class RequestHandler {
     // 3. 构建最终的Google请求体
     const googleRequest = {
       contents: googleContents,
-      // 如果systemInstruction存在，则添加到请求中
       ...(systemInstruction && {
         systemInstruction: { parts: systemInstruction.parts },
       }),
     };
+
+    if (modelName.includes("image")) {
+      this.logger.info(
+        `[Adapter] 检测到文生图模型 (${modelName})，正在添加图像生成工具...`
+      );
+      googleRequest.tools = [
+        {
+          functionDeclarations: [
+            {
+              name: "image_generation_tool",
+              description: "Creates an image from a text description.",
+              parameters: {
+                type: "OBJECT",
+                properties: {
+                  prompt: {
+                    type: "STRING",
+                    description: "A description of the image to generate.",
+                  },
+                  negative_prompt: {
+                    type: "STRING",
+                    description:
+                      "A description of what not to include in the image.",
+                  },
+                  aspect_ratio: {
+                    type: "STRING",
+                    description: "The aspect ratio of the image to generate.",
+                    enum: ["1:1", "16:9", "9:16", "4:3", "3:4"],
+                  },
+                  seed: {
+                    type: "INTEGER",
+                    description: "The seed for the image generator.",
+                  },
+                },
+                required: ["prompt"],
+              },
+            },
+          ],
+        },
+      ];
+    }
 
     // 4. 转换生成参数
     const generationConfig = {
@@ -1527,7 +1577,7 @@ class RequestHandler {
   // [最终版修复] 请用这个完整的函数替换掉旧的 _translateGoogleToOpenAIStream 函数
   _translateGoogleToOpenAIStream(googleChunk, modelName = "gemini-pro") {
     if (!googleChunk || googleChunk.trim() === "") {
-      return null; // 忽略空块
+      return null;
     }
 
     // [修复] 检查并移除 SSE 的 "data: " 前缀
@@ -1537,9 +1587,7 @@ class RequestHandler {
     }
 
     // 如果移除前后为空（例如 keep-alive 消息），则忽略
-    if (!jsonString || jsonString === "[DONE]") {
-      return null;
-    }
+    if (!jsonString || jsonString === "[DONE]") return null;
 
     let googleResponse;
     try {
@@ -1574,8 +1622,27 @@ class RequestHandler {
     }
 
     // 提取核心内容和结束原因
-    const content = candidate.content?.parts?.[0]?.text || "";
-    // Google流式响应的finishReason在candidate层级
+    const contentPart = candidate.content?.parts?.[0];
+    const toolCallPart = candidate.content?.tool_calls?.[0]; // [核心新增] 检查工具调用
+    let content = "";
+
+    // [核心新增] 判断响应是文本还是图片(工具调用)
+    if (
+      toolCallPart &&
+      toolCallPart.functionCall?.name === "image_generation_tool"
+    ) {
+      this.logger.info("[Adapter] 收到图像生成工具的调用结果...");
+      const args = toolCallPart.functionCall.args;
+      if (args && args.images && args.images.length > 0) {
+        const image = args.images[0];
+        // 将图片转换为Markdown格式的data URL
+        content = `![Generated Image](data:${image.mime_type};base64,${image.b64_data})`;
+      }
+    } else if (contentPart) {
+      // 正常文本
+      content = contentPart.text || "";
+    }
+
     const finishReason = candidate.finishReason;
 
     const openaiResponse = {
@@ -1586,10 +1653,7 @@ class RequestHandler {
       choices: [
         {
           index: 0,
-          delta: {
-            content: content,
-          },
-          // [修复] 正确映射finish_reason
+          delta: { content: content },
           finish_reason: finishReason || null,
         },
       ],
