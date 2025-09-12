@@ -839,7 +839,6 @@ class RequestHandler {
     });
 
     if (!this.connectionRegistry.hasActiveConnections()) {
-      // --- 在恢复前，检查“总锁” ---
       if (this.isSystemBusy) {
         this.logger.warn(
           "[System] 检测到连接断开，但系统正在进行切换/恢复，拒绝新请求。"
@@ -902,11 +901,13 @@ class RequestHandler {
     const messageQueue = this.connectionRegistry.createMessageQueue(requestId);
 
     try {
-      // [修改] 增加“交通警察”逻辑，根据客户端Accept头判断其期望的响应类型
-      const wantsStream =
+      const wantsStreamByHeader =
         req.headers.accept && req.headers.accept.includes("text/event-stream");
+      const wantsStreamByPath = req.path.includes(":streamGenerateContent");
+      const wantsStream = wantsStreamByHeader || wantsStreamByPath;
 
       if (wantsStream) {
+        // --- 客户端想要流式响应 ---
         this.logger.info("[Request] 客户端请求流式响应，进入流式处理模式...");
         if (this.serverSystem.streamingMode === "fake") {
           await this._handlePseudoStreamResponse(
@@ -919,6 +920,9 @@ class RequestHandler {
           await this._handleRealStreamResponse(proxyRequest, messageQueue, res);
         }
       } else {
+        // --- 客户端想要非流式响应 ---
+        // 明确告知浏览器脚本本次应按“一次性JSON”（即fake模式）来处理
+        proxyRequest.streaming_mode = "fake";
         await this._handleNonStreamResponse(proxyRequest, messageQueue, res);
       }
     } catch (error) {
