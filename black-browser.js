@@ -372,11 +372,13 @@ class ProxySystem extends EventTarget {
           break;
         default:
           // 默认情况，认为是代理请求
-          Logger.output(
-            `收到请求: ${requestSpec.method} ${requestSpec.path} (模式: ${
-              requestSpec.streaming_mode || "fake"
-            })`
-          );
+          let logText = `收到请求: ${requestSpec.method} ${requestSpec.path}`;
+          // [修改] 只有在客户端明确请求流式传输时，才显示服务器的处理模式
+          if (requestSpec.client_wants_stream) {
+            logText += ` (模式: ${requestSpec.streaming_mode || "fake"})`;
+          }
+          Logger.output(logText);
+
           await this._processProxyRequest(requestSpec);
           break;
       }
