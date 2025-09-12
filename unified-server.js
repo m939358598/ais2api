@@ -1027,19 +1027,25 @@ class RequestHandler {
 
         let responseContent = "";
         const candidate = googleResponse.candidates?.[0];
-        const toolCallPart = candidate?.content?.tool_calls?.[0];
 
         if (
-          toolCallPart &&
-          toolCallPart.functionCall?.name === "image_generation_tool"
+          candidate &&
+          candidate.content &&
+          Array.isArray(candidate.content.parts)
         ) {
-          const args = toolCallPart.functionCall.args;
-          if (args && args.images && args.images.length > 0) {
-            const image = args.images[0];
-            responseContent = `![Generated Image](data:${image.mime_type};base64,${image.b64_data})`;
+          // 优先在 parts 中寻找图片数据
+          const imagePart = candidate.content.parts.find((p) => p.inlineData);
+          if (imagePart) {
+            const image = imagePart.inlineData;
+            responseContent = `![Generated Image](data:${image.mimeType};base64,${image.data})`;
+            this.logger.info(
+              "[Adapter] 从 parts.inlineData 中成功解析到图片。"
+            );
+          } else {
+            // 如果没有图片，则拼接所有文本部分
+            responseContent =
+              candidate.content.parts.map((p) => p.text).join("\n") || "";
           }
-        } else {
-          responseContent = candidate?.content?.parts?.[0]?.text || "";
         }
 
         const openaiResponse = {
@@ -1510,46 +1516,6 @@ class RequestHandler {
         systemInstruction: { parts: systemInstruction.parts },
       }),
     };
-
-    if (modelName.includes("image")) {
-      this.logger.info(
-        `[Adapter] 检测到文生图模型 (${modelName})，正在添加图像生成工具...`
-      );
-      googleRequest.tools = [
-        {
-          functionDeclarations: [
-            {
-              name: "image_generation_tool",
-              description: "Creates an image from a text description.",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  prompt: {
-                    type: "STRING",
-                    description: "A description of the image to generate.",
-                  },
-                  negative_prompt: {
-                    type: "STRING",
-                    description:
-                      "A description of what not to include in the image.",
-                  },
-                  aspect_ratio: {
-                    type: "STRING",
-                    description: "The aspect ratio of the image to generate.",
-                    enum: ["1:1", "16:9", "9:16", "4:3", "3:4"],
-                  },
-                  seed: {
-                    type: "INTEGER",
-                    description: "The seed for the image generator.",
-                  },
-                },
-                required: ["prompt"],
-              },
-            },
-          ],
-        },
-      ];
-    }
 
     // 4. 转换生成参数
     const generationConfig = {
