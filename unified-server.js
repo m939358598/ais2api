@@ -2156,6 +2156,35 @@ class ProxyServerSystem extends EventEmitter {
       }
     });
     app.use(this._createAuthMiddleware());
+
+    app.get("/v1/models", (req, res) => {
+      const models = [
+        {
+          id: "gemini-2.5-pro",
+          object: "model",
+          created: Date.now(),
+          owned_by: "google",
+        },
+        {
+          id: "gemini-2.5-flash-image-preview",
+          object: "model",
+          created: Date.now(),
+          owned_by: "google",
+        },
+        {
+          id: "gemini-2.5-flash",
+          object: "model",
+          created: Date.now(),
+          owned_by: "google",
+        },
+      ];
+
+      res.status(200).json({
+        object: "list",
+        data: models,
+      });
+    });
+
     app.post("/v1/chat/completions", (req, res) => {
       this.requestHandler.processOpenAIRequest(req, res);
     });
