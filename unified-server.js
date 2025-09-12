@@ -285,8 +285,20 @@ class BrowserManager {
 
       // [优化] 在进行任何操作前，先给页面一个“呼吸”的时间，等待JS加载
       await this.page.waitForTimeout(3000);
-
-      // [核心修改] 回归最简洁的逻辑：只处理 "Got it" 弹窗
+      this.logger.info(`[Browser] 正在检查 Cookie 同意横幅...`);
+      try {
+        // 我们寻找文字为 "Agree" 的按钮，并设置一个较短的等待超时
+        const agreeButton = this.page.locator('button:text("Agree")');
+        await agreeButton.waitFor({ state: "visible", timeout: 10000 });
+        this.logger.info(
+          `[Browser] ✅ 发现 Cookie 同意横幅，正在点击 "Agree"...`
+        );
+        await agreeButton.click({ force: true });
+        // 点击后，给横幅一个消失的动画时间
+        await this.page.waitForTimeout(1000);
+      } catch (error) {
+        this.logger.info(`[Browser] 未发现 Cookie 同意横幅，跳过。`);
+      }
       this.logger.info(`[Browser] 正在检查 "Got it" 弹窗...`);
       try {
         const gotItButton = this.page.locator(
