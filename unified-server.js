@@ -1831,6 +1831,27 @@ class ProxyServerSystem extends EventEmitter {
       this.logger.info("[System] 未设置任何API Key，已启用默认密码: 123456");
     }
 
+    const modelsPath = path.join(__dirname, "models.json");
+    try {
+      if (fs.existsSync(modelsPath)) {
+        const modelsFileContent = fs.readFileSync(modelsPath, "utf-8");
+        config.modelList = JSON.parse(modelsFileContent); // 将读取到的模型列表存入config对象
+        this.logger.info(
+          `[System] 已从 models.json 成功加载 ${config.modelList.length} 个模型。`
+        );
+      } else {
+        this.logger.warn(
+          `[System] 未找到 models.json 文件，将使用默认模型列表。`
+        );
+        config.modelList = ["gemini-1.5-pro-latest"]; // 提供一个备用模型，防止服务启动失败
+      }
+    } catch (error) {
+      this.logger.error(
+        `[System] 读取或解析 models.json 失败: ${error.message}，将使用默认模型列表。`
+      );
+      config.modelList = ["gemini-1.5-pro-latest"]; // 出错时也使用备用模型
+    }
+
     this.config = config;
     this.logger.info("================ [ 生效配置 ] ================");
     this.logger.info(`  HTTP 服务端口: ${this.config.httpPort}`);
@@ -2321,26 +2342,14 @@ class ProxyServerSystem extends EventEmitter {
     app.use(this._createAuthMiddleware());
 
     app.get("/v1/models", (req, res) => {
-      const models = [
-        {
-          id: "gemini-2.5-pro",
-          object: "model",
-          created: Date.now(),
-          owned_by: "google",
-        },
-        {
-          id: "gemini-2.5-flash-image-preview",
-          object: "model",
-          created: Date.now(),
-          owned_by: "google",
-        },
-        {
-          id: "gemini-2.5-flash",
-          object: "model",
-          created: Date.now(),
-          owned_by: "google",
-        },
-      ];
+      const modelIds = this.config.modelList || ["gemini-2.5-pro"];
+
+      const models = modelIds.map((id) => ({
+        id: id,
+        object: "model",
+        created: Math.floor(Date.now() / 1000),
+        owned_by: "google",
+      }));
 
       res.status(200).json({
         object: "list",
