@@ -483,6 +483,7 @@ class ProxySystem extends EventTarget {
                   try {
                     const imageResponse = await fetch(imageUrl, {
                       headers: { Accept: "image/*" },
+                      credentials: "include",
                     });
                     if (!imageResponse.ok)
                       throw new Error(`下载失败: ${imageResponse.status}`);
