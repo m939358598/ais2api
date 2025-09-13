@@ -1537,20 +1537,16 @@ class RequestHandler {
     return googleRequest;
   }
 
-  // [新增] Google 到 OpenAI 响应的翻译器（流式）
-  // [最终版修复] 请用这个完整的函数替换掉旧的 _translateGoogleToOpenAIStream 函数
   _translateGoogleToOpenAIStream(googleChunk, modelName = "gemini-pro") {
     if (!googleChunk || googleChunk.trim() === "") {
       return null;
     }
 
-    // [修复] 检查并移除 SSE 的 "data: " 前缀
     let jsonString = googleChunk;
     if (jsonString.startsWith("data: ")) {
       jsonString = jsonString.substring(6).trim();
     }
 
-    // 如果移除前后为空（例如 keep-alive 消息），则忽略
     if (!jsonString || jsonString === "[DONE]") return null;
 
     let googleResponse;
@@ -1563,14 +1559,12 @@ class RequestHandler {
 
     const candidate = googleResponse.candidates?.[0];
     if (!candidate) {
-      // 检查是否存在因安全设置等原因导致的 promptFeedback
       if (googleResponse.promptFeedback) {
         this.logger.warn(
           `[Adapter] Google返回了promptFeedback，可能已被拦截: ${JSON.stringify(
             googleResponse.promptFeedback
           )}`
         );
-        // 可以在这里构建一个错误消息的OpenAI chunk
         const errorText = `[ProxySystem Error] Request blocked due to safety settings. Finish Reason: ${googleResponse.promptFeedback.blockReason}`;
         return `data: ${JSON.stringify({
           id: `chatcmpl-${this._generateRequestId()}`,
@@ -1585,26 +1579,19 @@ class RequestHandler {
       return null;
     }
 
-    // 提取核心内容和结束原因
-    const contentPart = candidate.content?.parts?.[0];
-    const toolCallPart = candidate.content?.tool_calls?.[0]; // [核心新增] 检查工具调用
+    // [核心修正] 引入与非流式一致的图片和文本解析逻辑
     let content = "";
-
-    // [核心新增] 判断响应是文本还是图片(工具调用)
-    if (
-      toolCallPart &&
-      toolCallPart.functionCall?.name === "image_generation_tool"
-    ) {
-      this.logger.info("[Adapter] 收到图像生成工具的调用结果...");
-      const args = toolCallPart.functionCall.args;
-      if (args && args.images && args.images.length > 0) {
-        const image = args.images[0];
-        // 将图片转换为Markdown格式的data URL
-        content = `![Generated Image](data:${image.mime_type};base64,${image.b64_data})`;
+    if (candidate.content && Array.isArray(candidate.content.parts)) {
+      const imagePart = candidate.content.parts.find((p) => p.inlineData);
+      if (imagePart) {
+        // 发现图片数据，生成完整的 Markdown 字符串
+        const image = imagePart.inlineData;
+        content = `![Generated Image](data:${image.mimeType};base64,${image.data})`;
+        this.logger.info("[Adapter] 从流式响应块中成功解析到图片。");
+      } else {
+        // 没有图片，则按原样拼接文本
+        content = candidate.content.parts.map((p) => p.text).join("") || "";
       }
-    } else if (contentPart) {
-      // 正常文本
-      content = contentPart.text || "";
     }
 
     const finishReason = candidate.finishReason;
