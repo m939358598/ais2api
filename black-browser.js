@@ -383,17 +383,29 @@ class ProxySystem extends EventTarget {
       const textDecoder = new TextDecoder();
       let fullBody = "";
 
-      // 读取完整的响应体
+      // [核心修正] 在循环内部正确分发流式和非流式数据
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        fullBody += textDecoder.decode(value, { stream: true });
+
+        const chunk = textDecoder.decode(value, { stream: true });
+
+        if (mode === "real") {
+          // 流式模式：立即转发每个数据块
+          this._transmitChunk(chunk, operationId);
+        } else {
+          // fake mode
+          // 非流式模式：拼接数据块，等待最后一次性转发
+          fullBody += chunk;
+        }
       }
 
-      Logger.output("数据流已读取完成，直接转发。");
+      Logger.output("数据流已读取完成。");
 
-      // 不再进行任何特殊的URL检测或Canvas转换，直接将原始响应块发送回服务器
-      this._transmitChunk(fullBody, operationId);
+      if (mode === "fake") {
+        // 非流式模式下，在循环结束后，转发拼接好的完整响应体
+        this._transmitChunk(fullBody, operationId);
+      }
 
       this._transmitStreamEnd(operationId);
     } catch (error) {
