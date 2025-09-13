@@ -1325,10 +1325,8 @@ class RequestHandler {
       // 1. 等待响应头信息
       const headerMessage = await messageQueue.dequeue();
       if (headerMessage.event_type === "error") {
-        if (
-          headerMessage.message &&
-          headerMessage.message.includes("The user aborted a request")
-        ) {
+        // ... (错误处理逻辑保持不变)
+        if (headerMessage.message?.includes("The user aborted a request")) {
           this.logger.info(
             `[Request] 请求 #${proxyRequest.request_id} 已被用户妥善取消。`
           );
@@ -1345,16 +1343,14 @@ class RequestHandler {
         );
       }
 
-      // 2. [核心修正] 准备一个缓冲区，并确保循环等待直到收到结束信号
+      // 2. 准备一个缓冲区，并确保循环等待直到收到结束信号
       let fullBody = "";
       while (true) {
-        const message = await messageQueue.dequeue(300000); // 使用统一的 dequeue
-
+        const message = await messageQueue.dequeue(300000);
         if (message.type === "STREAM_END") {
           this.logger.info("[Request] 收到流结束信号，数据接收完毕。");
-          break; // 只有收到结束信号才跳出循环
+          break;
         }
-
         if (message.event_type === "chunk" && message.data) {
           fullBody += message.data;
         }
@@ -1368,8 +1364,46 @@ class RequestHandler {
         this.failureCount = 0;
       }
 
-      // 4. 设置正确的JSON响应头，并一次性发送全部数据
-      // [修正] 确保即使 fullBody 为空也发送一个有效的JSON
+      // [核心修正] 对Google原生格式的响应进行智能图片处理
+      try {
+        let parsedBody = JSON.parse(fullBody);
+        let needsReserialization = false;
+
+        const candidate = parsedBody.candidates?.[0];
+        if (candidate?.content?.parts) {
+          const imagePartIndex = candidate.content.parts.findIndex(
+            (p) => p.inlineData
+          );
+
+          if (imagePartIndex > -1) {
+            this.logger.info(
+              "[Proxy] 检测到Google格式响应中的图片数据，正在转换为Markdown..."
+            );
+            const imagePart = candidate.content.parts[imagePartIndex];
+            const image = imagePart.inlineData;
+
+            // 创建一个新的 text part 来替换原来的 inlineData part
+            const markdownTextPart = {
+              text: `![Generated Image](data:${image.mimeType};base64,${image.data})`,
+            };
+
+            // 替换掉原来的部分
+            candidate.content.parts[imagePartIndex] = markdownTextPart;
+            needsReserialization = true;
+          }
+        }
+
+        if (needsReserialization) {
+          fullBody = JSON.stringify(parsedBody); // 如果处理了图片，重新序列化
+        }
+      } catch (e) {
+        this.logger.warn(
+          `[Proxy] 响应体不是有效的JSON，或在处理图片时出错: ${e.message}`
+        );
+        // 如果出错，则什么都不做，直接发送原始的 fullBody
+      }
+
+      // 4. 设置正确的JSON响应头，并一次性发送处理过的全部数据
       res
         .status(headerMessage.status || 200)
         .type("application/json")
