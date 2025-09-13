@@ -301,6 +301,48 @@ class RequestProcessor {
         config.body = requestSpec.body;
       }
     }
+    try {
+      if (bodyObj && bodyObj.contents) {
+        const isMultimodalModel = requestSpec.path.includes("-pro-");
+        const imageGenKeywords = [
+          "画",
+          "draw",
+          "生成",
+          "generate",
+          "create a picture",
+          "制作一张图片",
+        ];
+
+        const lastUserContent = bodyObj.contents.findLast(
+          (c) => c.role === "user"
+        );
+
+        if (isMultimodalModel && lastUserContent && lastUserContent.parts) {
+          const lastTextPart = lastUserContent.parts.findLast((p) => p.text);
+          if (
+            lastTextPart &&
+            imageGenKeywords.some((kw) =>
+              lastTextPart.text.toLowerCase().includes(kw)
+            )
+          ) {
+            Logger.output(
+              "[智能指令] 检测到多模态文生图请求，正在注入Base64返回指令..."
+            );
+
+            const instruction =
+              "\n\n[System note: Your task is to generate an image based on the user's request. CRITICALLY, you must respond with the generated image data directly embedded in the 'inlineData' field of the response. Do NOT under any circumstances return a URL or a link to the image. The response format must contain the raw base64 encoded image data.]";
+
+            if (!lastTextPart.text.includes(instruction)) {
+              // 防止重复注入
+              lastTextPart.text += instruction;
+              config.body = JSON.stringify(bodyObj); // 更新请求体
+            }
+          }
+        }
+      }
+    } catch (e) {
+      Logger.output(`[智能指令] 注入指令时发生错误: ${e.message}`);
+    }
     return config;
   }
 
