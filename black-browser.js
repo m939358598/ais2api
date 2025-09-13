@@ -229,7 +229,7 @@ class RequestProcessor {
       try {
         let bodyObj = JSON.parse(requestSpec.body);
 
-        // --- 模块1：智能过滤 (保持不变) ---
+        // --- 模块1：智能过滤 (保留) ---
         const isImageModel =
           requestSpec.path.includes("-image-") ||
           requestSpec.path.includes("imagen");
@@ -244,7 +244,7 @@ class RequestProcessor {
           }
         }
 
-        // --- 模块2：智能签名 (保持不变) ---
+        // --- 模块2：智能签名 (保留) ---
         if (bodyObj.contents && bodyObj.contents.length > 0) {
           const currentTurn = bodyObj.contents[bodyObj.contents.length - 1];
           if (currentTurn.parts?.length > 0) {
@@ -259,46 +259,6 @@ class RequestProcessor {
               currentTurn.parts.push({
                 text: `\n\n[sig:${this._generateRandomString(5)}]`,
               });
-            }
-          }
-        }
-
-        // --- 模块3：[全新的] 智能指令注入 - 链接生成 ---
-        const isMultimodalModel = requestSpec.path.includes("-pro-");
-        const imageGenKeywords = [
-          "画",
-          "draw",
-          "生成",
-          "generate",
-          "create a picture",
-          "制作一张图片",
-        ];
-        const lastUserContent = bodyObj.contents
-          ? bodyObj.contents.findLast((c) => c.role === "user")
-          : null;
-
-        if (isMultimodalModel && lastUserContent?.parts) {
-          const lastTextPart = lastUserContent.parts.findLast((p) => p.text);
-          if (
-            lastTextPart &&
-            imageGenKeywords.some((kw) =>
-              lastTextPart.text.toLowerCase().includes(kw)
-            )
-          ) {
-            Logger.output(
-              "[智能指令] 检测到多模态文生图请求，注入'链接生成'指令..."
-            );
-
-            const instruction = `\n\n[SYSTEM INSTRUCTION]: You are an image prompt generation assistant. When the user asks you to create an image, you MUST follow these rules exactly:
-1.  Do NOT generate the image data yourself.
-2.  You MUST respond with a Markdown image link.
-3.  The URL for the link MUST be in the format: \`https://image.pollinations.ai/prompt/{description}\`
-4.  The \`{description}\` part MUST be a detailed, vivid, URL-encoded English description of the image the user wants.
-Example: If the user says "画一只可爱的猫", you should output: "![A cute cat](https://image.pollinations.ai/prompt/A%20cute%20cat%20in%20digital%20art%20style)"
-Now, fulfill the user's request following these rules.`;
-
-            if (!lastTextPart.text.includes("[SYSTEM INSTRUCTION]")) {
-              lastTextPart.text += instruction;
             }
           }
         }
@@ -399,15 +359,42 @@ class ProxySystem extends EventTarget {
     }
   }
 
+  // 在 v3.4-black-browser.js 中
+  // [最终武器 - Canvas抽魂] 替换整个 _processProxyRequest 函数
   async _processProxyRequest(requestSpec) {
     const operationId = requestSpec.request_id;
     const mode = requestSpec.streaming_mode || "fake";
+
+    // Canvas 抽魂大法核心函数
+    const imageUrlToBase64 = (url) => {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = "Anonymous"; // 尝试解决CORS问题，虽然主要靠浏览器渲染引擎
+
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          const ctx = canvas.getContext("2d");
+          canvas.height = img.naturalHeight;
+          canvas.width = img.naturalWidth;
+          ctx.drawImage(img, 0, 0);
+          const dataUrl = canvas.toDataURL("image/webp"); // 或者 'image/png'
+          const base64 = dataUrl.split(",")[1];
+          resolve({ base64, mimeType: "image/webp" });
+        };
+
+        img.onerror = (err) => {
+          reject(new Error(`图片加载失败: ${url}`));
+        };
+
+        img.src = url;
+      });
+    };
 
     try {
       if (this.requestProcessor.cancelledOperations.has(operationId)) {
         throw new DOMException("The user aborted a request.", "AbortError");
       }
-      const { responsePromise, cancelTimeout } = this.requestProcessor.execute(
+      const { responsePromise } = this.requestProcessor.execute(
         requestSpec,
         operationId
       );
@@ -424,18 +411,59 @@ class ProxySystem extends EventTarget {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = textDecoder.decode(value, { stream: true });
-        if (mode === "real") {
-          this._transmitChunk(chunk, operationId);
-        } else {
-          fullBody += chunk;
-        }
+        fullBody += textDecoder.decode(value, { stream: true });
       }
 
-      Logger.output("数据流已读取完成。");
+      Logger.output("数据流已读取完成，开始最终处理...");
 
+      // 注意：这个方案只在非流式下有效，因为需要完整的JSON
       if (mode === "fake") {
-        // 在非流式模式下，直接转发完整响应体
+        try {
+          let parsedBody = JSON.parse(fullBody);
+          let needsReserialization = false;
+
+          if (
+            parsedBody.candidates &&
+            parsedBody.candidates[0]?.content?.parts
+          ) {
+            const parts = parsedBody.candidates[0].content.parts;
+            for (let i = 0; i < parts.length; i++) {
+              const part = parts[i];
+              const urlMatch = part.text
+                ? part.text.match(
+                    /!\[.*?\]\((https?:\/\/storage\.googleapis\.com\/[^)]+)\)/
+                  )
+                : null;
+
+              if (urlMatch && urlMatch[1]) {
+                Logger.output("[Canvas抽魂] 检测到私有URL，启动Canvas转换...");
+                const imageUrl = urlMatch[1];
+                try {
+                  const { base64, mimeType } = await imageUrlToBase64(imageUrl);
+                  parts[i] = {
+                    inlineData: { mimeType: mimeType, data: base64 },
+                  };
+                  needsReserialization = true;
+                  Logger.output(`[Canvas抽魂] ✅ 成功转换图片为Base64！`);
+                } catch (error) {
+                  Logger.output(`[Canvas抽魂] ❌ 转换失败: ${error.message}`);
+                  parts[i].text = `[图片转换失败: ${error.message}]`;
+                  needsReserialization = true;
+                }
+              }
+            }
+          }
+
+          if (needsReserialization) {
+            fullBody = JSON.stringify(parsedBody);
+          }
+          this._transmitChunk(fullBody, operationId);
+        } catch (e) {
+          Logger.output(`⚠️ [诊断] 处理响应失败: ${e.message}`);
+          this._transmitChunk(fullBody, operationId);
+        }
+      } else {
+        // 流式模式下无法处理，直接转发
         this._transmitChunk(fullBody, operationId);
       }
 
