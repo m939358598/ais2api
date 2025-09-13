@@ -222,7 +222,6 @@ class RequestProcessor {
       signal,
     };
 
-    // 关键修正：将 bodyObj 的声明和处理逻辑放在同一个作用域下
     if (
       ["POST", "PUT", "PATCH"].includes(requestSpec.method) &&
       requestSpec.body
@@ -230,52 +229,28 @@ class RequestProcessor {
       try {
         let bodyObj = JSON.parse(requestSpec.body);
 
-        // --- 模块1：智能过滤 ---
+        // --- 模块1：智能过滤 (保持不变) ---
         const isImageModel =
           requestSpec.path.includes("-image-") ||
           requestSpec.path.includes("imagen");
 
         if (isImageModel) {
           const incompatibleKeys = ["tool_config", "toolChoice", "tools"];
-          let removedKeys = [];
           incompatibleKeys.forEach((key) => {
-            if (bodyObj.hasOwnProperty(key)) {
-              delete bodyObj[key];
-              removedKeys.push(key);
-            }
+            if (bodyObj.hasOwnProperty(key)) delete bodyObj[key];
           });
-          if (
-            bodyObj.generationConfig &&
-            bodyObj.generationConfig.hasOwnProperty("thinkingConfig")
-          ) {
+          if (bodyObj.generationConfig?.thinkingConfig) {
             delete bodyObj.generationConfig.thinkingConfig;
-            removedKeys.push("generationConfig.thinkingConfig");
-          }
-          if (removedKeys.length > 0) {
-            Logger.output(
-              `[智能过滤] 已为图像模型移除不兼容参数: ${removedKeys.join(", ")}`
-            );
           }
         }
 
-        // --- 模块2：智能签名 ---
-        if (
-          bodyObj.contents &&
-          Array.isArray(bodyObj.contents) &&
-          bodyObj.contents.length > 0
-        ) {
+        // --- 模块2：智能签名 (保持不变) ---
+        if (bodyObj.contents && bodyObj.contents.length > 0) {
           const currentTurn = bodyObj.contents[bodyObj.contents.length - 1];
-          if (currentTurn.parts && Array.isArray(currentTurn.parts)) {
-            let lastTextPart = null;
-            for (let i = currentTurn.parts.length - 1; i >= 0; i--) {
-              if (currentTurn.parts[i].text) {
-                lastTextPart = currentTurn.parts[i];
-                break;
-              }
-            }
+          if (currentTurn.parts?.length > 0) {
+            let lastTextPart = currentTurn.parts.findLast((p) => p.text);
             if (lastTextPart) {
               if (!lastTextPart.text.includes("[sig:")) {
-                // 避免重复添加
                 lastTextPart.text += `\n\n[sig:${this._generateRandomString(
                   5
                 )}]`;
@@ -288,7 +263,7 @@ class RequestProcessor {
           }
         }
 
-        // --- 模块3：[修正后的] 智能指令注入 ---
+        // --- 模块3：[全新的] 智能指令注入 - 链接生成 ---
         const isMultimodalModel = requestSpec.path.includes("-pro-");
         const imageGenKeywords = [
           "画",
@@ -302,7 +277,7 @@ class RequestProcessor {
           ? bodyObj.contents.findLast((c) => c.role === "user")
           : null;
 
-        if (isMultimodalModel && lastUserContent && lastUserContent.parts) {
+        if (isMultimodalModel && lastUserContent?.parts) {
           const lastTextPart = lastUserContent.parts.findLast((p) => p.text);
           if (
             lastTextPart &&
@@ -311,21 +286,27 @@ class RequestProcessor {
             )
           ) {
             Logger.output(
-              "[智能指令] 检测到多模态文生图请求，正在注入Base64返回指令..."
+              "[智能指令] 检测到多模态文生图请求，注入'链接生成'指令..."
             );
-            const instruction =
-              "\n\n[System note: Your task is to generate an image based on the user's request. CRITICALLY, you must respond with the generated image data directly embedded in the 'inlineData' field of the response. Do NOT under any circumstances return a URL or a link to the image. The response format must contain the raw base64 encoded image data.]";
-            if (!lastTextPart.text.includes(instruction)) {
+
+            const instruction = `\n\n[SYSTEM INSTRUCTION]: You are an image prompt generation assistant. When the user asks you to create an image, you MUST follow these rules exactly:
+1.  Do NOT generate the image data yourself.
+2.  You MUST respond with a Markdown image link.
+3.  The URL for the link MUST be in the format: \`https://image.pollinations.ai/prompt/{description}\`
+4.  The \`{description}\` part MUST be a detailed, vivid, URL-encoded English description of the image the user wants.
+Example: If the user says "画一只可爱的猫", you should output: "![A cute cat](https://image.pollinations.ai/prompt/A%20cute%20cat%20in%20digital%20art%20style)"
+Now, fulfill the user's request following these rules.`;
+
+            if (!lastTextPart.text.includes("[SYSTEM INSTRUCTION]")) {
               lastTextPart.text += instruction;
             }
           }
         }
 
-        // 最终将处理过的 bodyObj 序列化
         config.body = JSON.stringify(bodyObj);
       } catch (e) {
         Logger.output("处理请求体时发生错误:", e.message);
-        config.body = requestSpec.body; // 出错时使用原始body
+        config.body = requestSpec.body;
       }
     }
 
@@ -422,15 +403,6 @@ class ProxySystem extends EventTarget {
     const operationId = requestSpec.request_id;
     const mode = requestSpec.streaming_mode || "fake";
 
-    const blobToBase64 = (blob) => {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result.split(",")[1]);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-    };
-
     try {
       if (this.requestProcessor.cancelledOperations.has(operationId)) {
         throw new DOMException("The user aborted a request.", "AbortError");
@@ -463,71 +435,10 @@ class ProxySystem extends EventTarget {
       Logger.output("数据流已读取完成。");
 
       if (mode === "fake") {
-        try {
-          let parsedBody = JSON.parse(fullBody);
-          let needsReserialization = false;
-
-          // [双重保险 - 智能下载模块 V2]
-          if (
-            parsedBody.candidates &&
-            parsedBody.candidates[0]?.content?.parts
-          ) {
-            const parts = parsedBody.candidates[0].content.parts;
-            // 使用 for 循环以支持在循环内部进行异步操作
-            for (let i = 0; i < parts.length; i++) {
-              const part = parts[i];
-
-              // [核心修正] 使用通用正则表达式匹配任何Markdown图片链接
-              const urlMatch = part.text
-                ? part.text.match(/!\[.*?\]\((https?:\/\/[^)]+)\)/)
-                : null;
-
-              if (urlMatch && urlMatch[1]) {
-                Logger.output(
-                  "[智能下载] 指令注入失败或模型返回URL，启动备用下载方案..."
-                );
-                const imageUrl = urlMatch[1];
-                try {
-                  // [核心修正] 重新添加 credentials: 'include' 以访问内部链接
-                  const imageResponse = await fetch(imageUrl, {
-                    credentials: "include",
-                  });
-                  if (!imageResponse.ok)
-                    throw new Error(`下载失败: ${imageResponse.status}`);
-
-                  const blob = await imageResponse.blob();
-                  const base64data = await blobToBase64(blob);
-
-                  parts[i] = {
-                    inlineData: { mimeType: blob.type, data: base64data },
-                  };
-                  needsReserialization = true;
-                  Logger.output(
-                    `[智能下载] ✅ 成功下载并转换图片 (MIME: ${blob.type})。`
-                  );
-                } catch (downloadError) {
-                  Logger.output(
-                    `[智能下载] ❌ 图片下载失败: ${downloadError.message}`
-                  );
-                  parts[
-                    i
-                  ].text = `[图片下载失败: ${downloadError.message}, 原始链接: ${imageUrl}]`;
-                  needsReserialization = true;
-                }
-              }
-            }
-          }
-
-          if (needsReserialization) {
-            fullBody = JSON.stringify(parsedBody);
-          }
-
-          this._transmitChunk(fullBody, operationId);
-        } catch (e) {
-          Logger.output(`⚠️ [诊断] 处理响应失败: ${e.message}`);
-          this._transmitChunk(fullBody, operationId);
-        }
+        // 在非流式模式下，直接转发完整响应体
+        this._transmitChunk(fullBody, operationId);
       }
+
       this._transmitStreamEnd(operationId);
     } catch (error) {
       if (error.name === "AbortError") {
