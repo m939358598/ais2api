@@ -365,31 +365,6 @@ class ProxySystem extends EventTarget {
     const operationId = requestSpec.request_id;
     const mode = requestSpec.streaming_mode || "fake";
 
-    // Canvas 抽魂大法核心函数
-    const imageUrlToBase64 = (url) => {
-      return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.crossOrigin = "Anonymous"; // 尝试解决CORS问题，虽然主要靠浏览器渲染引擎
-
-        img.onload = () => {
-          const canvas = document.createElement("canvas");
-          const ctx = canvas.getContext("2d");
-          canvas.height = img.naturalHeight;
-          canvas.width = img.naturalWidth;
-          ctx.drawImage(img, 0, 0);
-          const dataUrl = canvas.toDataURL("image/webp"); // 或者 'image/png'
-          const base64 = dataUrl.split(",")[1];
-          resolve({ base64, mimeType: "image/webp" });
-        };
-
-        img.onerror = (err) => {
-          reject(new Error(`图片加载失败: ${url}`));
-        };
-
-        img.src = url;
-      });
-    };
-
     try {
       if (this.requestProcessor.cancelledOperations.has(operationId)) {
         throw new DOMException("The user aborted a request.", "AbortError");
@@ -408,64 +383,17 @@ class ProxySystem extends EventTarget {
       const textDecoder = new TextDecoder();
       let fullBody = "";
 
+      // 读取完整的响应体
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         fullBody += textDecoder.decode(value, { stream: true });
       }
 
-      Logger.output("数据流已读取完成，开始最终处理...");
+      Logger.output("数据流已读取完成，直接转发。");
 
-      // 注意：这个方案只在非流式下有效，因为需要完整的JSON
-      if (mode === "fake") {
-        try {
-          let parsedBody = JSON.parse(fullBody);
-          let needsReserialization = false;
-
-          if (
-            parsedBody.candidates &&
-            parsedBody.candidates[0]?.content?.parts
-          ) {
-            const parts = parsedBody.candidates[0].content.parts;
-            for (let i = 0; i < parts.length; i++) {
-              const part = parts[i];
-              const urlMatch = part.text
-                ? part.text.match(
-                    /!\[.*?\]\((https?:\/\/storage\.googleapis\.com\/[^)]+)\)/
-                  )
-                : null;
-
-              if (urlMatch && urlMatch[1]) {
-                Logger.output("[Canvas抽魂] 检测到私有URL，启动Canvas转换...");
-                const imageUrl = urlMatch[1];
-                try {
-                  const { base64, mimeType } = await imageUrlToBase64(imageUrl);
-                  parts[i] = {
-                    inlineData: { mimeType: mimeType, data: base64 },
-                  };
-                  needsReserialization = true;
-                  Logger.output(`[Canvas抽魂] ✅ 成功转换图片为Base64！`);
-                } catch (error) {
-                  Logger.output(`[Canvas抽魂] ❌ 转换失败: ${error.message}`);
-                  parts[i].text = `[图片转换失败: ${error.message}]`;
-                  needsReserialization = true;
-                }
-              }
-            }
-          }
-
-          if (needsReserialization) {
-            fullBody = JSON.stringify(parsedBody);
-          }
-          this._transmitChunk(fullBody, operationId);
-        } catch (e) {
-          Logger.output(`⚠️ [诊断] 处理响应失败: ${e.message}`);
-          this._transmitChunk(fullBody, operationId);
-        }
-      } else {
-        // 流式模式下无法处理，直接转发
-        this._transmitChunk(fullBody, operationId);
-      }
+      // 不再进行任何特殊的URL检测或Canvas转换，直接将原始响应块发送回服务器
+      this._transmitChunk(fullBody, operationId);
 
       this._transmitStreamEnd(operationId);
     } catch (error) {
