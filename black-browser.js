@@ -364,6 +364,7 @@ class ProxySystem extends EventTarget {
   async _processProxyRequest(requestSpec) {
     const operationId = requestSpec.request_id;
     const mode = requestSpec.streaming_mode || "fake";
+    Logger.output(`浏览器收到请求`);
 
     try {
       if (this.requestProcessor.cancelledOperations.has(operationId)) {
