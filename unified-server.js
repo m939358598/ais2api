@@ -1534,40 +1534,6 @@ class RequestHandler {
     ];
 
     this.logger.info("[Adapter] 翻译完成。");
-    try {
-      const isMultimodalModel = modelName.includes("-pro-");
-      const imageGenKeywords = [
-        "画",
-        "draw",
-        "生成",
-        "generate",
-        "create a picture",
-        "制作一张图片",
-      ];
-
-      const lastUserContent = googleContents.findLast((c) => c.role === "user");
-
-      if (isMultimodalModel && lastUserContent && lastUserContent.parts) {
-        const lastTextPart = lastUserContent.parts.findLast((p) => p.text);
-        if (
-          lastTextPart &&
-          imageGenKeywords.some((kw) =>
-            lastTextPart.text.toLowerCase().includes(kw)
-          )
-        ) {
-          this.logger.info(
-            "[Adapter] 检测到多模态文生图请求，正在注入Base64返回指令..."
-          );
-
-          const instruction =
-            "\n\n[System note: Your task is to generate an image based on the user's request. CRITICALLY, you must respond with the generated image data directly embedded in the 'inlineData' field of the response. Do NOT under any circumstances return a URL or a link to the image. The response format must contain the raw base64 encoded image data.]";
-
-          lastTextPart.text += instruction;
-        }
-      }
-    } catch (e) {
-      this.logger.error(`[Adapter] 注入指令时发生错误: ${e.message}`);
-    }
     return googleRequest;
   }
 
