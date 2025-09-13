@@ -391,21 +391,9 @@ class ProxySystem extends EventTarget {
   }
 
   // --- MODIFIED: _processProxyRequest 方法 ---
-  // 在 v3.2-black-browser.js 中
-  // [最终升级] 用这个完整的函数替换掉旧的 _processProxyRequest 函数
   async _processProxyRequest(requestSpec) {
     const operationId = requestSpec.request_id;
     const mode = requestSpec.streaming_mode || "fake";
-
-    // Base64 转换的辅助函数
-    const blobToBase64 = (blob) => {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result.split(",")[1]);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-    };
 
     try {
       if (this.requestProcessor.cancelledOperations.has(operationId)) {
@@ -435,10 +423,7 @@ class ProxySystem extends EventTarget {
           timeoutCancelled = true;
         }
         const chunk = textDecoder.decode(value, { stream: true });
-
         if (mode === "real") {
-          this._transmitChunk(chunk, operationId);
-          // 在流式模式下，也尝试解析 finishReason
           const lines = chunk.split("\n");
           for (const line of lines) {
             if (line.startsWith("data: ")) {
@@ -450,93 +435,34 @@ class ProxySystem extends EventTarget {
               } catch (e) {}
             }
           }
+        }
+        if (mode === "real") {
+          this._transmitChunk(chunk, operationId);
         } else {
-          // fake mode
           fullBody += chunk;
         }
       }
 
       Logger.output("数据流已读取完成。");
-
-      if (mode === "fake") {
+      if (mode === "real") {
+        Logger.output(`✅ [诊断] 响应结束，原因: ${finalFinishReason}`);
+      } else {
         try {
-          let parsedBody = JSON.parse(fullBody);
-          let needsReserialization = false;
-
-          // [智能下载模块] 检查并处理 Google Storage URL
-          if (
-            parsedBody.candidates &&
-            parsedBody.candidates[0]?.content?.parts
-          ) {
-            const parts = parsedBody.candidates[0].content.parts;
-            for (let i = 0; i < parts.length; i++) {
-              const part = parts[i];
-              if (part.text && part.text.includes("storage.googleapis.com")) {
-                Logger.output(
-                  "[智能下载] 检测到Google Storage URL，开始代理下载..."
-                );
-                const urlMatch = part.text.match(
-                  /\((https?:\/\/storage\.googleapis\.com\/.*?)\)/
-                );
-                if (urlMatch && urlMatch[1]) {
-                  const imageUrl = urlMatch[1];
-                  try {
-                    const imageResponse = await fetch(imageUrl, {
-                      headers: { Accept: "image/*" },
-                      credentials: "include",
-                    });
-                    if (!imageResponse.ok)
-                      throw new Error(`下载失败: ${imageResponse.status}`);
-
-                    const blob = await imageResponse.blob();
-                    const base64data = await blobToBase64(blob);
-
-                    // 将包含URL的text part替换为标准的inlineData part
-                    parts[i] = {
-                      inlineData: { mimeType: blob.type, data: base64data },
-                    };
-                    needsReserialization = true;
-                    Logger.output(
-                      `[智能下载] ✅ 成功下载并转换图片 (MIME: ${blob.type})。`
-                    );
-                  } catch (downloadError) {
-                    Logger.output(
-                      `[智能下载] ❌ 图片下载失败: ${downloadError.message}`
-                    );
-                    // 保留原始文本，让用户知道URL是什么
-                    parts[
-                      i
-                    ].text = `[图片下载失败: ${downloadError.message}, 原始链接: ${imageUrl}]`;
-                    needsReserialization = true;
-                  }
-                }
-              }
-            }
+          const parsedBody = JSON.parse(fullBody);
+          const finishReason = parsedBody.candidates?.[0]?.finishReason;
+          const safetyRatings = parsedBody.candidates?.[0]?.safetyRatings;
+          Logger.output(`✅ [诊断] 响应结束，原因: ${finishReason || "未知"}`);
+          if (safetyRatings) {
+            Logger.output(
+              `[诊断] 安全评级详情: ${JSON.stringify(safetyRatings)}`
+            );
           }
-
-          if (needsReserialization) {
-            fullBody = JSON.stringify(parsedBody);
-          }
-
-          // 使用可能已被修改的 fullBody 继续
-          const finalParsedBody = JSON.parse(fullBody);
-          const finishReason =
-            finalParsedBody.candidates?.[0]?.finishReason || "STOP"; // 如果有图片，默认完成状态为STOP
-          Logger.output(`✅ [诊断] 响应结束，原因: ${finishReason}`);
           this._transmitChunk(fullBody, operationId);
         } catch (e) {
-          Logger.output(
-            `⚠️ [诊断] 响应体不是有效的JSON格式或处理失败: ${e.message}`
-          );
+          Logger.output(`⚠️ [诊断] 响应体不是有效的JSON格式。`);
           this._transmitChunk(fullBody, operationId);
         }
-      } else {
-        // real mode
-        Logger.output(
-          `✅ [诊断] 流式响应结束，最后已知原因: ${finalFinishReason}`
-        );
       }
-
       this._transmitStreamEnd(operationId);
     } catch (error) {
       if (error.name === "AbortError") {
