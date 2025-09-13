@@ -266,9 +266,11 @@ class BrowserManager {
       this.page.on("console", (msg) => {
         const msgText = msg.text();
         if (msgText.includes("[ProxyClient]")) {
-          this.logger.info(
-            `[Browser] ${msgText.replace("[ProxyClient] ", "")}`
+          const cleanMsg = msgText.replace(
+            /\[ProxyClient\]\s\d{2}:\d{2}:\d{2}\.\d{3}\s/,
+            ""
           );
+          this.logger.info(`[Browser] ${cleanMsg}`);
         } else if (msg.type() === "error") {
           this.logger.error(`[Browser Page Error] ${msgText}`);
         }
@@ -920,7 +922,9 @@ class RequestHandler {
     try {
       if (wantsStream) {
         // --- 客户端想要流式响应 ---
-        this.logger.info("[Request] 客户端启用流式传输，进入流式处理模式...");
+        this.logger.info(
+          `[Request] 客户端启用流式传输 (${this.serverSystem.streamingMode})，进入流式处理模式...`
+        );
         if (this.serverSystem.streamingMode === "fake") {
           await this._handlePseudoStreamResponse(
             proxyRequest,
@@ -1135,6 +1139,9 @@ class RequestHandler {
   }
 
   async _handlePseudoStreamResponse(proxyRequest, messageQueue, req, res) {
+    this.logger.info(
+      "[Request] 客户端启用流式传输 (fake)，进入伪流式处理模式..."
+    );
     res.status(200).set({
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -1238,12 +1245,19 @@ class RequestHandler {
       const dataMessage = await messageQueue.dequeue();
       const endMessage = await messageQueue.dequeue();
       if (dataMessage.data) {
-        // (诊断日志逻辑保持不变)
         res.write(`data: ${dataMessage.data}\n\n`);
       }
       if (endMessage.type !== "STREAM_END") {
         this.logger.warn("[Request] 未收到预期的流结束信号。");
       }
+      try {
+        const fullResponse = JSON.parse(dataMessage.data);
+        const finishReason =
+          fullResponse.candidates?.[0]?.finishReason || "UNKNOWN";
+        this.logger.info(
+          `✅ [Request] 响应结束，原因: ${finishReason}，请求ID: ${proxyRequest.request_id}`
+        );
+      } catch (e) {}
       res.write("data: [DONE]\n\n");
     } catch (error) {
       this._handleRequestError(error, res);
@@ -1294,16 +1308,33 @@ class RequestHandler {
     // --- 修改结束 ---
 
     this._setResponseHeaders(res, headerMessage);
-    this.logger.info("[Request] 已向客户端发送真实响应头，开始流式传输...");
+    this.logger.info("[Request] 开始流式传输...");
     try {
+      let lastChunk = "";
       while (true) {
         const dataMessage = await messageQueue.dequeue(30000);
         if (dataMessage.type === "STREAM_END") {
           this.logger.info("[Request] 收到流结束信号。");
           break;
         }
-        if (dataMessage.data) res.write(dataMessage.data);
+        if (dataMessage.data) {
+          res.write(dataMessage.data);
+          lastChunk = dataMessage.data;
+        }
       }
+      try {
+        if (lastChunk.startsWith("data: ")) {
+          const jsonString = lastChunk.substring(6).trim();
+          if (jsonString) {
+            const lastResponse = JSON.parse(jsonString);
+            const finishReason =
+              lastResponse.candidates?.[0]?.finishReason || "UNKNOWN";
+            this.logger.info(
+              `✅ [Request] 响应结束，原因: ${finishReason}，请求ID: ${proxyRequest.request_id}`
+            );
+          }
+        }
+      } catch (e) {}
     } catch (error) {
       if (error.message !== "Queue timeout") throw error;
       this.logger.warn("[Request] 真流式响应超时，可能流已正常结束。");
@@ -1316,7 +1347,7 @@ class RequestHandler {
   }
 
   async _handleNonStreamResponse(proxyRequest, messageQueue, res) {
-    this.logger.info(`[Request] 客户端请求非流式响应，启动标准处理模式...`);
+    this.logger.info(`[Request] 进入非流式处理模式...`);
 
     // 转发请求到浏览器端
     this._forwardRequest(proxyRequest);
@@ -1348,7 +1379,7 @@ class RequestHandler {
       while (true) {
         const message = await messageQueue.dequeue(300000);
         if (message.type === "STREAM_END") {
-          this.logger.info("[Request] 收到流结束信号，数据接收完毕。");
+          this.logger.info("[Request] 收到结束信号，数据接收完毕。");
           break;
         }
         if (message.event_type === "chunk" && message.data) {
@@ -1403,13 +1434,22 @@ class RequestHandler {
         // 如果出错，则什么都不做，直接发送原始的 fullBody
       }
 
+      try {
+        const fullResponse = JSON.parse(fullBody);
+        const finishReason =
+          fullResponse.candidates?.[0]?.finishReason || "UNKNOWN";
+        this.logger.info(
+          `✅ [Request] 响应结束，原因: ${finishReason}，请求ID: ${proxyRequest.request_id}`
+        );
+      } catch (e) {}
+
       // 4. 设置正确的JSON响应头，并一次性发送处理过的全部数据
       res
         .status(headerMessage.status || 200)
         .type("application/json")
         .send(fullBody || "{}");
 
-      this.logger.info(`[Request] 已向客户端发送完整的非流式JSON响应。`);
+      this.logger.info(`[Request] 已向客户端发送完整的非流式响应。`);
     } catch (error) {
       this._handleRequestError(error, res);
     }
