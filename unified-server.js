@@ -1004,7 +1004,7 @@ class RequestHandler {
         });
 
         this._forwardRequest(proxyRequest);
-
+        let lastGoogleChunk = "";
         // 循环接收并翻译响应
         while (true) {
           const message = await messageQueue.dequeue(300000); // 5分钟超时
@@ -1022,8 +1022,24 @@ class RequestHandler {
             }
           }
         }
+
+        try {
+          if (lastGoogleChunk.startsWith("data: ")) {
+            const jsonString = lastGoogleChunk.substring(6).trim();
+            if (jsonString) {
+              const lastResponse = JSON.parse(jsonString);
+              const finishReason =
+                lastResponse.candidates?.[0]?.finishReason || "UNKNOWN";
+              this.logger.info(
+                `✅ [Request] 响应结束，原因: ${finishReason}，请求ID: ${requestId}`
+              );
+            }
+          }
+        } catch (e) {
+          // 解析失败则不记录，以防万一
+        }
       } else {
-        // 非流式逻辑 (更简单)
+        // 非流式逻辑
         this._forwardRequest(proxyRequest);
         await messageQueue.dequeue(); // Header
         const bodyMsg = await messageQueue.dequeue();
@@ -1065,6 +1081,12 @@ class RequestHandler {
             },
           ],
         };
+
+        const finishReason = candidate?.finishReason || "UNKNOWN";
+        this.logger.info(
+          `✅ [Request] 响应结束，原因: ${finishReason}，请求ID: ${requestId}`
+        );
+
         res.status(200).json(openaiResponse);
       }
     } catch (error) {
