@@ -221,6 +221,8 @@ class RequestProcessor {
       headers: this._sanitizeHeaders(requestSpec.headers),
       signal,
     };
+
+    // 关键修正：将 bodyObj 的声明和处理逻辑放在同一个作用域下
     if (
       ["POST", "PUT", "PATCH"].includes(requestSpec.method) &&
       requestSpec.body
@@ -228,6 +230,7 @@ class RequestProcessor {
       try {
         let bodyObj = JSON.parse(requestSpec.body);
 
+        // --- 模块1：智能过滤 ---
         const isImageModel =
           requestSpec.path.includes("-image-") ||
           requestSpec.path.includes("imagen");
@@ -255,19 +258,14 @@ class RequestProcessor {
           }
         }
 
-        // ==========================================================
-        // [最终版] 精确为当前回合的最后文本部分添加签名
-        // ==========================================================
+        // --- 模块2：智能签名 ---
         if (
           bodyObj.contents &&
           Array.isArray(bodyObj.contents) &&
           bodyObj.contents.length > 0
         ) {
-          // 1. 直接定位到聊天历史的最后一轮 (即当前用户的输入)
           const currentTurn = bodyObj.contents[bodyObj.contents.length - 1];
-
           if (currentTurn.parts && Array.isArray(currentTurn.parts)) {
-            // 2. 在当前轮次中，寻找最后一个文本部分
             let lastTextPart = null;
             for (let i = currentTurn.parts.length - 1; i >= 0; i--) {
               if (currentTurn.parts[i].text) {
@@ -275,34 +273,22 @@ class RequestProcessor {
                 break;
               }
             }
-
-            // 3. 为找到的文本部分添加签名
             if (lastTextPart) {
-              Logger.output(
-                "[智能签名] 已定位到当前回合的文本部分，添加SIG..."
-              );
-              lastTextPart.text += `\n\n[sig:${this._generateRandomString(5)}]`;
+              if (!lastTextPart.text.includes("[sig:")) {
+                // 避免重复添加
+                lastTextPart.text += `\n\n[sig:${this._generateRandomString(
+                  5
+                )}]`;
+              }
             } else {
-              // 4. 如果当前轮次只有图片没有文本，则新建一个文本part来携带签名
-              Logger.output(
-                "[智能签名] 当前回合无文本，新建文本部分以携带SIG..."
-              );
               currentTurn.parts.push({
                 text: `\n\n[sig:${this._generateRandomString(5)}]`,
               });
             }
           }
         }
-        // ==========================================================
 
-        config.body = JSON.stringify(bodyObj);
-      } catch (e) {
-        Logger.output("处理请求体时发生错误:", e.message);
-        config.body = requestSpec.body;
-      }
-    }
-    try {
-      if (bodyObj && bodyObj.contents) {
+        // --- 模块3：[修正后的] 智能指令注入 ---
         const isMultimodalModel = requestSpec.path.includes("-pro-");
         const imageGenKeywords = [
           "画",
@@ -312,10 +298,9 @@ class RequestProcessor {
           "create a picture",
           "制作一张图片",
         ];
-
-        const lastUserContent = bodyObj.contents.findLast(
-          (c) => c.role === "user"
-        );
+        const lastUserContent = bodyObj.contents
+          ? bodyObj.contents.findLast((c) => c.role === "user")
+          : null;
 
         if (isMultimodalModel && lastUserContent && lastUserContent.parts) {
           const lastTextPart = lastUserContent.parts.findLast((p) => p.text);
@@ -328,21 +313,22 @@ class RequestProcessor {
             Logger.output(
               "[智能指令] 检测到多模态文生图请求，正在注入Base64返回指令..."
             );
-
             const instruction =
               "\n\n[System note: Your task is to generate an image based on the user's request. CRITICALLY, you must respond with the generated image data directly embedded in the 'inlineData' field of the response. Do NOT under any circumstances return a URL or a link to the image. The response format must contain the raw base64 encoded image data.]";
-
             if (!lastTextPart.text.includes(instruction)) {
-              // 防止重复注入
               lastTextPart.text += instruction;
-              config.body = JSON.stringify(bodyObj); // 更新请求体
             }
           }
         }
+
+        // 最终将处理过的 bodyObj 序列化
+        config.body = JSON.stringify(bodyObj);
+      } catch (e) {
+        Logger.output("处理请求体时发生错误:", e.message);
+        config.body = requestSpec.body; // 出错时使用原始body
       }
-    } catch (e) {
-      Logger.output(`[智能指令] 注入指令时发生错误: ${e.message}`);
     }
+
     return config;
   }
 
@@ -432,10 +418,18 @@ class ProxySystem extends EventTarget {
     }
   }
 
-  // --- MODIFIED: _processProxyRequest 方法 ---
   async _processProxyRequest(requestSpec) {
     const operationId = requestSpec.request_id;
     const mode = requestSpec.streaming_mode || "fake";
+
+    const blobToBase64 = (blob) => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result.split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    };
 
     try {
       if (this.requestProcessor.cancelledOperations.has(operationId)) {
@@ -453,31 +447,12 @@ class ProxySystem extends EventTarget {
       this._transmitHeaders(response, operationId);
       const reader = response.body.getReader();
       const textDecoder = new TextDecoder();
-      let timeoutCancelled = false;
       let fullBody = "";
-      let finalFinishReason = "UNKNOWN";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (!timeoutCancelled) {
-          cancelTimeout();
-          timeoutCancelled = true;
-        }
         const chunk = textDecoder.decode(value, { stream: true });
-        if (mode === "real") {
-          const lines = chunk.split("\n");
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              try {
-                const jsonData = JSON.parse(line.substring(5));
-                if (jsonData.candidates?.[0]?.finishReason) {
-                  finalFinishReason = jsonData.candidates[0].finishReason;
-                }
-              } catch (e) {}
-            }
-          }
-        }
         if (mode === "real") {
           this._transmitChunk(chunk, operationId);
         } else {
@@ -486,27 +461,71 @@ class ProxySystem extends EventTarget {
       }
 
       Logger.output("数据流已读取完成。");
-      if (mode === "real") {
-        Logger.output(`✅ [诊断] 响应结束，原因: ${finalFinishReason}`);
-      } else {
+
+      if (mode === "fake") {
         try {
-          const parsedBody = JSON.parse(fullBody);
-          const finishReason = parsedBody.candidates?.[0]?.finishReason;
-          const safetyRatings = parsedBody.candidates?.[0]?.safetyRatings;
-          Logger.output(`✅ [诊断] 响应结束，原因: ${finishReason || "未知"}`);
-          if (safetyRatings) {
-            Logger.output(
-              `[诊断] 安全评级详情: ${JSON.stringify(safetyRatings)}`
-            );
+          let parsedBody = JSON.parse(fullBody);
+          let needsReserialization = false;
+
+          // [双重保险 - 智能下载模块]
+          if (
+            parsedBody.candidates &&
+            parsedBody.candidates[0]?.content?.parts
+          ) {
+            const parts = parsedBody.candidates[0].content.parts;
+            for (let i = 0; i < parts.length; i++) {
+              const part = parts[i];
+              const urlMatch = part.text
+                ? part.text.match(
+                    /\((https?:\/\/files\.oaiusercontent\.com\/.*?)\)/
+                  )
+                : null;
+
+              if (urlMatch && urlMatch[1]) {
+                Logger.output(
+                  "[智能下载] 指令注入失败，检测到URL，启动备用下载方案..."
+                );
+                const imageUrl = urlMatch[1];
+                try {
+                  const imageResponse = await fetch(imageUrl); // 注意：这里不再需要 credentials: 'include'
+                  if (!imageResponse.ok)
+                    throw new Error(`下载失败: ${imageResponse.status}`);
+
+                  const blob = await imageResponse.blob();
+                  const base64data = await blobToBase64(blob);
+
+                  parts[i] = {
+                    inlineData: { mimeType: blob.type, data: base64data },
+                  };
+                  needsReserialization = true;
+                  Logger.output(
+                    `[智能下载] ✅ 成功下载并转换图片 (MIME: ${blob.type})。`
+                  );
+                } catch (downloadError) {
+                  Logger.output(
+                    `[智能下载] ❌ 图片下载失败: ${downloadError.message}`
+                  );
+                  parts[
+                    i
+                  ].text = `[图片下载失败: ${downloadError.message}, 原始链接: ${imageUrl}]`;
+                  needsReserialization = true;
+                }
+              }
+            }
           }
+
+          if (needsReserialization) {
+            fullBody = JSON.stringify(parsedBody);
+          }
+
           this._transmitChunk(fullBody, operationId);
         } catch (e) {
-          Logger.output(`⚠️ [诊断] 响应体不是有效的JSON格式。`);
           this._transmitChunk(fullBody, operationId);
         }
       }
       this._transmitStreamEnd(operationId);
     } catch (error) {
+      // ... (error handling remains the same)
       if (error.name === "AbortError") {
         Logger.output(`[诊断] 操作 #${operationId} 已被用户中止。`);
       } else {
