@@ -467,27 +467,31 @@ class ProxySystem extends EventTarget {
           let parsedBody = JSON.parse(fullBody);
           let needsReserialization = false;
 
-          // [双重保险 - 智能下载模块]
+          // [双重保险 - 智能下载模块 V2]
           if (
             parsedBody.candidates &&
             parsedBody.candidates[0]?.content?.parts
           ) {
             const parts = parsedBody.candidates[0].content.parts;
+            // 使用 for 循环以支持在循环内部进行异步操作
             for (let i = 0; i < parts.length; i++) {
               const part = parts[i];
+
+              // [核心修正] 使用通用正则表达式匹配任何Markdown图片链接
               const urlMatch = part.text
-                ? part.text.match(
-                    /\((https?:\/\/files\.oaiusercontent\.com\/.*?)\)/
-                  )
+                ? part.text.match(/!\[.*?\]\((https?:\/\/[^)]+)\)/)
                 : null;
 
               if (urlMatch && urlMatch[1]) {
                 Logger.output(
-                  "[智能下载] 指令注入失败，检测到URL，启动备用下载方案..."
+                  "[智能下载] 指令注入失败或模型返回URL，启动备用下载方案..."
                 );
                 const imageUrl = urlMatch[1];
                 try {
-                  const imageResponse = await fetch(imageUrl); // 注意：这里不再需要 credentials: 'include'
+                  // [核心修正] 重新添加 credentials: 'include' 以访问内部链接
+                  const imageResponse = await fetch(imageUrl, {
+                    credentials: "include",
+                  });
                   if (!imageResponse.ok)
                     throw new Error(`下载失败: ${imageResponse.status}`);
 
@@ -520,12 +524,12 @@ class ProxySystem extends EventTarget {
 
           this._transmitChunk(fullBody, operationId);
         } catch (e) {
+          Logger.output(`⚠️ [诊断] 处理响应失败: ${e.message}`);
           this._transmitChunk(fullBody, operationId);
         }
       }
       this._transmitStreamEnd(operationId);
     } catch (error) {
-      // ... (error handling remains the same)
       if (error.name === "AbortError") {
         Logger.output(`[诊断] 操作 #${operationId} 已被用户中止。`);
       } else {
