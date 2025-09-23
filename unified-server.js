@@ -213,7 +213,6 @@ class BrowserManager {
           `Browser executable not found at path: ${this.browserExecutablePath}`
         );
       }
-      // [优化] 启动浏览器时应用优化参数
       this.browser = await firefox.launch({
         headless: true,
         executablePath: this.browserExecutablePath,
@@ -266,11 +265,9 @@ class BrowserManager {
       this.page.on("console", (msg) => {
         const msgText = msg.text();
         if (msgText.includes("[ProxyClient]")) {
-          const cleanMsg = msgText.replace(
-            /\[ProxyClient\]\s\d{2}:\d{2}:\d{2}\.\d{3}\s/,
-            ""
+          this.logger.info(
+            `[Browser] ${msgText.replace("[ProxyClient] ", "")}`
           );
-          this.logger.info(`[Browser] ${cleanMsg}`);
         } else if (msg.type() === "error") {
           this.logger.error(`[Browser Page Error] ${msgText}`);
         }
@@ -285,22 +282,21 @@ class BrowserManager {
       });
       this.logger.info("[Browser] 页面加载完成。");
 
-      // [优化] 在进行任何操作前，先给页面一个“呼吸”的时间，等待JS加载
       await this.page.waitForTimeout(3000);
+
       this.logger.info(`[Browser] 正在检查 Cookie 同意横幅...`);
       try {
-        // 我们寻找文字为 "Agree" 的按钮，并设置一个较短的等待超时
         const agreeButton = this.page.locator('button:text("Agree")');
         await agreeButton.waitFor({ state: "visible", timeout: 10000 });
         this.logger.info(
           `[Browser] ✅ 发现 Cookie 同意横幅，正在点击 "Agree"...`
         );
         await agreeButton.click({ force: true });
-        // 点击后，给横幅一个消失的动画时间
         await this.page.waitForTimeout(1000);
       } catch (error) {
         this.logger.info(`[Browser] 未发现 Cookie 同意横幅，跳过。`);
       }
+
       this.logger.info(`[Browser] 正在检查 "Got it" 弹窗...`);
       try {
         const gotItButton = this.page.locator(
@@ -309,14 +305,25 @@ class BrowserManager {
         await gotItButton.waitFor({ state: "visible", timeout: 15000 });
         this.logger.info(`[Browser] ✅ 发现 "Got it" 弹窗，正在点击...`);
         await gotItButton.click({ force: true });
+        await this.page.waitForTimeout(1000);
       } catch (error) {
         this.logger.info(`[Browser] 未发现 "Got it" 弹窗，跳过。`);
       }
 
-      // [最终稳定版修复] 不论之前发生了什么，在进行关键交互前，统一等待所有可能的遮罩层消失
-      this.logger.info("[Browser] 准备UI交互，强行移除所有可能的遮罩层...");
+      this.logger.info(`[Browser] 正在检查新手引导...`);
+      try {
+        const closeButton = this.page.locator('button[aria-label="Close"]');
+        await closeButton.waitFor({ state: "visible", timeout: 15000 });
+        this.logger.info(`[Browser] ✅ 发现新手引导弹窗，正在点击关闭按钮...`);
+        await closeButton.click({ force: true });
+        await this.page.waitForTimeout(1000);
+      } catch (error) {
+        this.logger.info(
+          `[Browser] 未发现 "It's time to build" 新手引导，跳过。`
+        );
+      }
 
-      // 使用 page.evaluate 执行JS，找到所有遮罩层并直接删除它们
+      this.logger.info("[Browser] 准备UI交互，强行移除所有可能的遮罩层...");
       await this.page.evaluate(() => {
         const overlays = document.querySelectorAll("div.cdk-overlay-backdrop");
         if (overlays.length > 0) {
@@ -326,37 +333,51 @@ class BrowserManager {
           overlays.forEach((el) => el.remove());
         }
       });
+
       this.logger.info('[Browser] (步骤1/5) 准备点击 "Code" 按钮...');
-      const maxRetries = 5;
-      let clickSuccess = false;
-      for (let i = 1; i <= maxRetries; i++) {
+      for (let i = 1; i <= 5; i++) {
         try {
-          this.logger.info(`  [尝试 ${i}/${maxRetries}] 清理遮罩层并点击...`);
-          // 每次尝试前都强力清除遮罩层
+          this.logger.info(`  [尝试 ${i}/5] 清理遮罩层并点击...`);
           await this.page.evaluate(() => {
             document
               .querySelectorAll("div.cdk-overlay-backdrop")
               .forEach((el) => el.remove());
           });
-          await this.page.waitForTimeout(500); // 清理后短暂等待
+          await this.page.waitForTimeout(500);
 
           await this.page
             .locator('button:text("Code")')
-            .click({ timeout: 10000 }); // 将单次超时缩短
-          clickSuccess = true;
+            .click({ timeout: 10000 });
           this.logger.info("  ✅ 点击成功！");
-          break; // 成功后跳出循环
+          break;
         } catch (error) {
           this.logger.warn(
-            `  [尝试 ${i}/${maxRetries}] 点击失败: ${
-              error.message.split("\n")[0]
-            }`
+            `  [尝试 ${i}/5] 点击失败: ${error.message.split("\n")[0]}`
           );
-          if (i === maxRetries) {
+          if (i === 5) {
+            // [新增截图] 在最终失败时保存截图
+            try {
+              const screenshotPath = path.join(
+                __dirname,
+                "debug_screenshot_final.png"
+              );
+              await this.page.screenshot({
+                path: screenshotPath,
+                fullPage: true,
+              });
+              this.logger.info(
+                `[调试] 最终失败截图已保存到: ${screenshotPath}`
+              );
+            } catch (screenshotError) {
+              this.logger.error(
+                `[调试] 保存截图失败: ${screenshotError.message}`
+              );
+            }
             throw new Error(`多次尝试后仍无法点击 "Code" 按钮，初始化失败。`);
           }
         }
       }
+
       this.logger.info(
         '[Browser] (步骤2/5) "Code" 按钮点击成功，等待编辑器变为可见...'
       );
@@ -368,7 +389,6 @@ class BrowserManager {
         timeout: 60000,
       });
 
-      // [清场动作 #2] 在点击编辑器前，再次移除所有可能新生成的遮罩层
       this.logger.info(
         "[Browser] (清场 #2) 准备点击编辑器，再次强行移除所有可能的遮罩层..."
       );
@@ -381,7 +401,7 @@ class BrowserManager {
           overlays.forEach((el) => el.remove());
         }
       });
-      await this.page.waitForTimeout(250); // 短暂等待DOM更新
+      await this.page.waitForTimeout(250);
 
       this.logger.info("[Browser] (步骤3/5) 编辑器已显示，聚焦并粘贴脚本...");
       await editorContainerLocator.click({ timeout: 30000 });
